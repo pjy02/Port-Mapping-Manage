@@ -7,7 +7,7 @@
 # 脚本配置
 SCRIPT_VERSION="3.0"
 RULE_COMMENT="udp-port-mapping-script-v3"
-CONFIG_DIR="/etc/udp-port-mapping"
+CONFIG_DIR="/etc/port_mapping_manager"
 LOG_FILE="/var/log/udp-port-mapping.log"
 BACKUP_DIR="$CONFIG_DIR/backups"
 CONFIG_FILE="$CONFIG_DIR/config.conf"
@@ -1264,7 +1264,7 @@ uninstall_script() {
     rm -rf "$CONFIG_DIR"
 
     # 5. 删除脚本与快捷启动器 (若位于 /usr/local/bin 或当前目录)
-    local paths=("/usr/local/bin/port_mapping_manager.sh" "/usr/local/bin/pmm" "$(dirname "$0")/pmm")
+    local paths=("/usr/local/bin/port_mapping_manager.sh" "/usr/local/bin/pmm" "/etc/port_mapping_manager/port_mapping_manager.sh" "/etc/port_mapping_manager/pmm" "$(dirname "$0")/pmm")
     for p in "${paths[@]}"; do [ -f "$p" ] && rm -f "$p" && echo "已删除 $p"; done
 
     echo -e "${GREEN}卸载完成${NC}"
