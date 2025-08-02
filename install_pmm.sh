@@ -6,8 +6,9 @@
 
 set -euo pipefail
 
-REMOTE_BASE="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main"  # TODO: 替换为真实仓库地址
+REMOTE_BASE="https://raw.githubusercontent.com/<USER>/<REPO>/main"  # TODO: 替换为真实仓库地址
 INSTALL_DIR="/usr/local/bin"
+SCRIPT_DIR="/etc/port_mapping_manager"
 TMP_DIR="$(mktemp -d)"
 
 files=("port_mapping_manager.sh" "pmm")
@@ -20,7 +21,8 @@ for f in "${files[@]}"; do
 done
 
 echo "[PMM] 拷贝到 $INSTALL_DIR (需要sudo权限)"
-sudo cp "$TMP_DIR/port_mapping_manager.sh" "$INSTALL_DIR/port_mapping_manager.sh"
+sudo mkdir -p "$SCRIPT_DIR"
+sudo cp "$TMP_DIR/port_mapping_manager.sh" "$SCRIPT_DIR/port_mapping_manager.sh"
 sudo cp "$TMP_DIR/pmm" "$INSTALL_DIR/pmm"
 
 rm -rf "$TMP_DIR"
