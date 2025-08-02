@@ -428,19 +428,20 @@ show_current_rules() {
 
     local total_rules=0
 
-    local iptables_cmd=$(get_iptables_cmd $IP_VERSION)
-    if [ -z "$iptables_cmd" ]; then
-        return
-    fi
+    for ip_version in 4 6; do
+        local iptables_cmd=$(get_iptables_cmd $ip_version)
+        if [ -z "$iptables_cmd" ]; then
+            continue
+        fi
 
-    echo -e "\n${YELLOW}--- IPv${IP_VERSION} 规则 ---${NC}"
+        echo -e "\n${YELLOW}--- IPv${ip_version} 规则 ---${NC}"
 
-    local rules=$($iptables_cmd -t nat -L PREROUTING -n --line-numbers 2>/dev/null)
+        local rules=$($iptables_cmd -t nat -L PREROUTING -n --line-numbers 2>/dev/null)
 
-    if [ -z "$rules" ] || [[ $(echo "$rules" | wc -l) -le 2 ]]; then
-        echo -e "${YELLOW}未找到 IPv${IP_VERSION} 映射规则。${NC}"
-        return
-    fi
+        if [ -z "$rules" ] || [[ $(echo "$rules" | wc -l) -le 2 ]]; then
+            echo -e "${YELLOW}未找到 IPv${ip_version} 映射规则。${NC}"
+            continue
+        fi
 
         printf "%-4s %-18s %-8s %-15s %-15s %-20s %-10s %-6s\n" \
             "No." "Type" "Prot" "Source" "Destination" "PortRange" "DstPort" "From"
@@ -487,8 +488,9 @@ show_current_rules() {
         done <<< "$rules"
 
         echo "---------------------------------------------------------------------------------"
-        echo -e "${GREEN}共 $rule_count 条 IPv${IP_VERSION} 规则 | 🟢=活跃 🔴=非活跃${NC}"
+        echo -e "${GREEN}共 $rule_count 条 IPv${ip_version} 规则 | 🟢=活跃 🔴=非活跃${NC}"
         total_rules=$((total_rules + rule_count))
+    done
 
     if [ "$total_rules" -eq 0 ]; then
         echo -e "${YELLOW}未找到任何由本脚本创建的映射规则。${NC}"
@@ -514,10 +516,11 @@ check_rule_active() {
 show_traffic_stats() {
     echo -e "\n${CYAN}流量统计概览：${NC}"
 
-    local iptables_cmd=$(get_iptables_cmd $IP_VERSION)
-    if [ -z "$iptables_cmd" ]; then
-        return
-    fi
+    for ip_version in 4 6; do
+        local iptables_cmd=$(get_iptables_cmd $ip_version)
+        if [ -z "$iptables_cmd" ]; then
+            continue
+        fi
 
         local total_packets=0
         local total_bytes=0
@@ -534,11 +537,12 @@ show_traffic_stats() {
             fi
         done < <($iptables_cmd -t nat -L PREROUTING -v -n 2>/dev/null)
 
-    if [ "$total_packets" -gt 0 ] || [ "$total_bytes" -gt 0 ]; then
-        echo -e "${YELLOW}--- IPv${IP_VERSION} 流量 ---${NC}"
-        echo "总数据包: $total_packets"
-        echo "总字节数: $(format_bytes $total_bytes)"
-    fi
+        if [ "$total_packets" -gt 0 ] || [ "$total_bytes" -gt 0 ]; then
+            echo -e "${YELLOW}--- IPv${ip_version} 流量 ---${NC}"
+            echo "总数据包: $total_packets"
+            echo "总字节数: $(format_bytes $total_bytes)"
+        fi
+    done
 }
 
 # 格式化字节显示
