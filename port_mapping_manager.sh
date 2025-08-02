@@ -106,7 +106,7 @@ interactive_cleanup_backups() {
         echo "$((i+1)). $date ($size)"
     done
     echo
-    read -p "请输入要删除的备份序号(多个用逗号分隔，输入 all 删除全部): " choices
+    read -p "请输入要删除的备份序号(可输入多个，用空格、逗号等分隔，输入 all 删除全部): " choices
     if [ "$choices" = "all" ]; then
         rm -f "${backups[@]}"
         echo -e "${GREEN}✓ 已删除全部备份${NC}"
@@ -114,7 +114,9 @@ interactive_cleanup_backups() {
         return
     fi
 
-    IFS=',' read -ra selected <<< "$choices"
+    # 将所有非数字字符转换为空格作为分隔符
+    choices=$(echo "$choices" | tr -cs '0-9' ' ')
+    read -ra selected <<< "$choices"
     local deleted=0
     for sel in "${selected[@]}"; do
         sel=$(echo "$sel" | xargs)
@@ -1026,13 +1028,15 @@ delete_specific_rule() {
         echo "$((i+1)). [${origins[$i]}] $rule_info"
     done
 
-    read -p "请输入规则序号(可输入多个，用逗号分隔): " choices
+    read -p "请输入规则序号(可输入多个，用空格、逗号等分隔): " choices
     if [ -z "$choices" ]; then
         echo -e "${RED}未输入序号${NC}"
         return
     fi
 
-    IFS=',' read -ra choice_arr <<< "$choices"
+    # 将所有非数字字符转换为空格作为分隔符
+    choices=$(echo "$choices" | tr -cs '0-9' ' ')
+    read -ra choice_arr <<< "$choices"
     local valid_choices=()
     for sel in "${choice_arr[@]}"; do
         sel=$(echo "$sel" | xargs)
@@ -1225,6 +1229,46 @@ full_reset_iptables() {
     if [[ "$save_choice" == "y" || "$save_choice" == "Y" ]]; then
         save_rules
     fi
+}
+
+# --- 一键卸载功能 ---
+
+uninstall_script() {
+    echo -e "${RED}⚠ 即将卸载脚本并删除脚本创建的全部映射规则${NC}"
+    read -p "确认继续卸载? (yes/NO): " confirm
+    if [[ "$confirm" != "yes" ]]; then
+        echo "已取消卸载"; return
+    fi
+
+    # 1. 删除脚本规则
+    echo "正在删除脚本创建的 iptables 规则..."
+    local rule_lines=( $(iptables -t nat -L PREROUTING --line-numbers | grep "$RULE_COMMENT" | awk '{print $1}' | sort -nr) )
+    for line_num in "${rule_lines[@]}"; do
+        iptables -t nat -D PREROUTING "$line_num" 2>/dev/null && echo "  - 删除规则 #$line_num"
+    done
+
+    # 2. 询问是否保存当前状态
+    read -p "是否保存规则变更? (y/n): " save_choice
+    if [[ "$save_choice" =~ ^[yY]$ ]]; then
+        save_rules
+    fi
+
+    # 3. 询问是否保留备份文件
+    read -p "是否保留备份目录 $BACKUP_DIR ? (y/n): " keep_backup
+    if [[ "$keep_backup" =~ ^[nN]$ ]]; then
+        rm -rf "$BACKUP_DIR" && echo "已删除备份目录"
+    fi
+
+    # 4. 删除配置、日志目录
+    rm -f "$LOG_FILE"
+    rm -rf "$CONFIG_DIR"
+
+    # 5. 删除脚本与快捷启动器 (若位于 /usr/local/bin 或当前目录)
+    local paths=("/usr/local/bin/port_mapping_manager.sh" "/usr/local/bin/pmm" "$(dirname "$0")/pmm")
+    for p in "${paths[@]}"; do [ -f "$p" ] && rm -f "$p" && echo "已删除 $p"; done
+
+    echo -e "${GREEN}卸载完成${NC}"
+    exit 0
 }
 
 # --- 主程序和菜单 ---
@@ -1467,6 +1511,9 @@ while [[ $# -gt 0 ]]; do
         --no-backup)
             AUTO_BACKUP=false
             shift
+            ;;
+        --uninstall)
+            uninstall_script
             ;;
         *)
             echo "未知参数: $1"
