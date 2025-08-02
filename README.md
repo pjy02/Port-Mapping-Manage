@@ -1,7 +1,7 @@
 # Enhanced UDP/TCP Port Mapping Script
 
-![Version](https://github.com/pjy02/Port-Mapping-Manage/blob/main/port_mapping_manager.sh)
-![License](https://github.com/pjy02/Port-Mapping-Manage/blob/main/LICENSE)
+![Version](https://img.shields.io/badge/version-3.1-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 > 强大且易用的 iptables 端口映射管理脚本，支持 **TCP / UDP** 协议、批量操作、规则持久化、实时流量监控、备份管理等高级特性。
 
