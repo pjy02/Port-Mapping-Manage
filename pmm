@@ -4,5 +4,5 @@
 # 1. chmod +x pmm
 # 2. (可选) sudo ln -s $(pwd)/pmm /usr/local/bin/pmm  # 使其成为全局命令
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/port_mapping_manager.sh" "$@"
+SCRIPT_PATH="/etc/port_mapping_manager/port_mapping_manager.sh"
+exec "$SCRIPT_PATH" "$@"
