@@ -828,6 +828,7 @@ save_rules() {
             if $iptables_save_cmd > "$rules_file"; then
                 echo -e "${GREEN}✓ 规则已保存到 $rules_file${NC}"
                 log_message "INFO" "规则保存到文件: $rules_file"
+                setup_systemd_service
                 return 0
             fi
             ;;
@@ -837,6 +838,34 @@ save_rules() {
     log_message "ERROR" "规则保存失败 (v${IP_VERSION})"
     show_manual_save_instructions
     return 1
+}
+
+# 配置 systemd 服务以实现持久化
+setup_systemd_service() {
+    local service_file="/etc/systemd/system/iptables-restore.service"
+    if [ ! -f "$service_file" ]; then
+        echo "正在创建 systemd 服务..."
+        cat > "$service_file" <<EOF
+[Unit]
+Description=Restore iptables rules
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/iptables-restore /etc/port_mapping_manager/current.rules.v4
+ExecStart=/sbin/ip6tables-restore /etc/port_mapping_manager/current.rules.v6
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable iptables-restore.service
+        echo -e "${GREEN}✓ systemd 服务已创建并启用${NC}"
+        log_message "INFO" "systemd 服务已创建并启用"
+    else
+        echo -e "${YELLOW}systemd 服务已存在，无需重复创建。${NC}"
+    fi
 }
 
 # --- 新增功能：批量操作 ---
