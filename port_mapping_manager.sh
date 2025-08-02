@@ -1348,6 +1348,7 @@ show_main_menu() {
     echo " 11. 帮助信息"
     echo " 12. 版本信息"
     echo " 13. 退出脚本"
+    echo " 99. 卸载脚本"
     echo
     echo "-----------------------------------------"
 }
@@ -1460,7 +1461,7 @@ initialize_script() {
 main_loop() {
     while true; do
         show_main_menu
-        read -p "请选择操作 [1-13]: " main_choice
+        read -p "请选择操作 [1-13/99]: " main_choice
         
         case $main_choice in
             1) setup_mapping ;;
@@ -1475,13 +1476,16 @@ main_loop() {
             10) save_rules ;;
             11) show_enhanced_help ;;
             12) show_version ;;
-            13) 
+            13)
                 echo -e "${GREEN}感谢使用UDP端口映射脚本！${NC}"
                 log_message "INFO" "脚本正常退出"
                 exit 0
                 ;;
+            99)
+                uninstall_script
+                ;;
             *) 
-                echo -e "${RED}无效选择，请输入 1-13${NC}"
+                echo -e "${RED}无效选择，请输入 1-13 或 99${NC}"
                 ;;
         esac
         
