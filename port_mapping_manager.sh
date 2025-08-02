@@ -428,20 +428,19 @@ show_current_rules() {
 
     local total_rules=0
 
-    for ip_version in 4 6; do
-        local iptables_cmd=$(get_iptables_cmd $ip_version)
-        if [ -z "$iptables_cmd" ]; then
-            continue
-        fi
+    local iptables_cmd=$(get_iptables_cmd $IP_VERSION)
+    if [ -z "$iptables_cmd" ]; then
+        return
+    fi
 
-        echo -e "\n${YELLOW}--- IPv${ip_version} 规则 ---${NC}"
+    echo -e "\n${YELLOW}--- IPv${IP_VERSION} 规则 ---${NC}"
 
-        local rules=$($iptables_cmd -t nat -L PREROUTING -n --line-numbers 2>/dev/null)
+    local rules=$($iptables_cmd -t nat -L PREROUTING -n --line-numbers 2>/dev/null)
 
-        if [ -z "$rules" ] || [[ $(echo "$rules" | wc -l) -le 2 ]]; then
-            echo -e "${YELLOW}未找到 IPv${ip_version} 映射规则。${NC}"
-            continue
-        fi
+    if [ -z "$rules" ] || [[ $(echo "$rules" | wc -l) -le 2 ]]; then
+        echo -e "${YELLOW}未找到 IPv${IP_VERSION} 映射规则。${NC}"
+        return
+    fi
 
         printf "%-4s %-18s %-8s %-15s %-15s %-20s %-10s %-6s\n" \
             "No." "Type" "Prot" "Source" "Destination" "PortRange" "DstPort" "From"
@@ -476,7 +475,7 @@ show_current_rules() {
             fi
 
             local status="🔴"
-            if check_rule_active "$port_range" "$redirect_port" "$ip_version"; then
+            if check_rule_active "$port_range" "$redirect_port"; then
                 status="🟢"
             fi
 
@@ -488,9 +487,8 @@ show_current_rules() {
         done <<< "$rules"
 
         echo "---------------------------------------------------------------------------------"
-        echo -e "${GREEN}共 $rule_count 条 IPv${ip_version} 规则 | 🟢=活跃 🔴=非活跃${NC}"
+        echo -e "${GREEN}共 $rule_count 条 IPv${IP_VERSION} 规则 | 🟢=活跃 🔴=非活跃${NC}"
         total_rules=$((total_rules + rule_count))
-    done
 
     if [ "$total_rules" -eq 0 ]; then
         echo -e "${YELLOW}未找到任何由本脚本创建的映射规则。${NC}"
@@ -504,15 +502,9 @@ show_current_rules() {
 check_rule_active() {
     local port_range=$1
     local service_port=$2
-    local ip_version=$3
     
-    local ss_cmd="ss -ulnp"
-    if [ "$ip_version" = "6" ]; then
-        ss_cmd="ss -ulnp6"
-    fi
-
     # 检查服务端口是否在监听
-    if $ss_cmd | grep -q ":$service_port "; then
+    if ss -ulnp | grep -q ":$service_port "; then
         return 0
     fi
     return 1
@@ -522,11 +514,10 @@ check_rule_active() {
 show_traffic_stats() {
     echo -e "\n${CYAN}流量统计概览：${NC}"
 
-    for ip_version in 4 6; do
-        local iptables_cmd=$(get_iptables_cmd $ip_version)
-        if [ -z "$iptables_cmd" ]; then
-            continue
-        fi
+    local iptables_cmd=$(get_iptables_cmd $IP_VERSION)
+    if [ -z "$iptables_cmd" ]; then
+        return
+    fi
 
         local total_packets=0
         local total_bytes=0
@@ -543,12 +534,11 @@ show_traffic_stats() {
             fi
         done < <($iptables_cmd -t nat -L PREROUTING -v -n 2>/dev/null)
 
-        if [ "$total_packets" -gt 0 ] || [ "$total_bytes" -gt 0 ]; then
-            echo -e "${YELLOW}--- IPv${ip_version} 流量 ---${NC}"
-            echo "总数据包: $total_packets"
-            echo "总字节数: $(format_bytes $total_bytes)"
-        fi
-    done
+    if [ "$total_packets" -gt 0 ] || [ "$total_bytes" -gt 0 ]; then
+        echo -e "${YELLOW}--- IPv${IP_VERSION} 流量 ---${NC}"
+        echo "总数据包: $total_packets"
+        echo "总字节数: $(format_bytes $total_bytes)"
+    fi
 }
 
 # 格式化字节显示
