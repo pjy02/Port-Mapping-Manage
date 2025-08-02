@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-REMOTE_BASE="https://raw.githubusercontent.com/<USER>/<REPO>/main"  # TODO: 替换为真实仓库地址
+REMOTE_BASE="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main"  # TODO: 替换为真实仓库地址
 INSTALL_DIR="/usr/local/bin"
 TMP_DIR="$(mktemp -d)"
 
