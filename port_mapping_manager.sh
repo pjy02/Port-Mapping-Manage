@@ -5,7 +5,7 @@
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断等功能
 
 # 脚本配置
-SCRIPT_VERSION="3.0"
+SCRIPT_VERSION="3.1"
 RULE_COMMENT="udp-port-mapping-script-v3"
 CONFIG_DIR="/etc/port_mapping_manager"
 LOG_FILE="/var/log/udp-port-mapping.log"
@@ -1419,7 +1419,9 @@ show_main_menu() {
     local ip_version_str="IPv${IP_VERSION}"
     echo -e "${GREEN}=========================================${NC}"
     echo -e "${GREEN}  UDP端口映射管理脚本 Enhanced v${SCRIPT_VERSION}  [当前: ${ip_version_str}]${NC}"
+    echo -e "${CYAN}  https://github.com/pjy02/Port-Mapping-Manage${NC}"
     echo -e "${GREEN}=========================================${NC}"
+
     echo
     echo -e "${BLUE}主要功能:${NC}"
     echo "  1. 设置端口映射 (手动配置)"
