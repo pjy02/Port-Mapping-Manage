@@ -421,76 +421,91 @@ handle_iptables_error() {
 # --- 核心功能增强 ---
 
 # 增强的规则显示
+show_rules_for_version() {
+    local ip_version=$1
+    local total_rules=0
+    local iptables_cmd
+
+    if [ "$ip_version" = "6" ]; then
+        iptables_cmd="ip6tables"
+    else
+        iptables_cmd="iptables"
+    fi
+
+    echo -e "\n${YELLOW}--- IPv${ip_version} 规则 ---${NC}"
+
+    local rules=$($iptables_cmd -t nat -L PREROUTING -n --line-numbers 2>/dev/null)
+
+    if [ -z "$rules" ] || [[ $(echo "$rules" | wc -l) -le 2 ]]; then
+        echo -e "${YELLOW}未找到 IPv${ip_version} 映射规则。${NC}"
+        return 0
+    fi
+
+    printf "%-4s %-18s %-8s %-15s %-15s %-20s %-10s %-6s\n" \
+        "No." "Type" "Prot" "Source" "Destination" "PortRange" "DstPort" "From"
+    echo "---------------------------------------------------------------------------------"
+
+    local rule_count=0
+    while IFS= read -r rule; do
+        if [[ "$rule" =~ ^Chain[[:space:]] ]] || [[ "$rule" =~ ^num[[:space:]] ]]; then
+            continue
+        fi
+        
+        local line_num=$(echo "$rule" | awk '{print $1}')
+        local target=$(echo "$rule" | awk '{print $2}')
+        local protocol=$(echo "$rule" | awk '{print $3}')
+        local source=$(echo "$rule" | awk '{print $4}')
+        local destination=$(echo "$rule" | awk '{print $5}')
+        local origin="外部"
+        if echo "$rule" | grep -q "$RULE_COMMENT"; then
+            origin="脚本"
+        fi
+
+        local port_range=""
+        if echo "$rule" | grep -q "dpts:"; then
+            port_range=$(echo "$rule" | sed -n 's/.*dpts:\([0-9]*:[0-9]*\).*/\1/p')
+        elif echo "$rule" | grep -q "dpt:"; then
+            port_range=$(echo "$rule" | sed -n 's/.*dpt:\([0-9]*\).*/\1/p')
+        fi
+
+        local redirect_port=""
+        if echo "$rule" | grep -q "redir ports"; then
+            redirect_port=$(echo "$rule" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p')
+        fi
+
+        local status="🔴"
+        if check_rule_active "$port_range" "$redirect_port"; then
+            status="🟢"
+        fi
+
+        printf "%-4s %-18s %-8s %-15s %-15s %-20s %-10s %-6s %s\n" \
+            "$line_num" "$target" "$protocol" "$source" "$destination" \
+            "$port_range" "$redirect_port" "$origin" "$status"
+
+        ((rule_count++))
+    done <<< "$rules"
+
+    echo "---------------------------------------------------------------------------------"
+    echo -e "${GREEN}共 $rule_count 条 IPv${ip_version} 规则 | 🟢=活跃 🔴=非活跃${NC}"
+    
+    return $rule_count
+}
+
 show_current_rules() {
     echo -e "${BLUE}=========================================${NC}"
     echo -e "${BLUE}      当前映射规则 (Enhanced View)${NC}"
     echo -e "${BLUE}=========================================${NC}"
 
-    local total_rules=0
+    local total_rules_v4=0
+    local total_rules_v6=0
 
-    local iptables_cmd=$(get_iptables_cmd $IP_VERSION)
-    if [ -z "$iptables_cmd" ]; then
-        return
-    fi
+    show_rules_for_version "4"
+    total_rules_v4=$?
 
-    echo -e "\n${YELLOW}--- IPv${IP_VERSION} 规则 ---${NC}"
+    show_rules_for_version "6"
+    total_rules_v6=$?
 
-    local rules=$($iptables_cmd -t nat -L PREROUTING -n --line-numbers 2>/dev/null)
-
-    if [ -z "$rules" ] || [[ $(echo "$rules" | wc -l) -le 2 ]]; then
-        echo -e "${YELLOW}未找到 IPv${IP_VERSION} 映射规则。${NC}"
-        return
-    fi
-
-        printf "%-4s %-18s %-8s %-15s %-15s %-20s %-10s %-6s\n" \
-            "No." "Type" "Prot" "Source" "Destination" "PortRange" "DstPort" "From"
-        echo "---------------------------------------------------------------------------------"
-
-        local rule_count=0
-        while IFS= read -r rule; do
-            if [[ "$rule" =~ ^Chain[[:space:]] ]] || [[ "$rule" =~ ^num[[:space:]] ]]; then
-                continue
-            fi
-            
-            local line_num=$(echo "$rule" | awk '{print $1}')
-            local target=$(echo "$rule" | awk '{print $2}')
-            local protocol=$(echo "$rule" | awk '{print $3}')
-            local source=$(echo "$rule" | awk '{print $4}')
-            local destination=$(echo "$rule" | awk '{print $5}')
-            local origin="外部"
-            if echo "$rule" | grep -q "$RULE_COMMENT"; then
-                origin="脚本"
-            fi
-
-            local port_range=""
-            if echo "$rule" | grep -q "dpts:"; then
-                port_range=$(echo "$rule" | sed -n 's/.*dpts:\([0-9]*:[0-9]*\).*/\1/p')
-            elif echo "$rule" | grep -q "dpt:"; then
-                port_range=$(echo "$rule" | sed -n 's/.*dpt:\([0-9]*\).*/\1/p')
-            fi
-
-            local redirect_port=""
-            if echo "$rule" | grep -q "redir ports"; then
-                redirect_port=$(echo "$rule" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p')
-            fi
-
-            local status="🔴"
-            if check_rule_active "$port_range" "$redirect_port"; then
-                status="🟢"
-            fi
-
-            printf "%-4s %-18s %-8s %-15s %-15s %-20s %-10s %-6s %s\n" \
-                "$line_num" "$target" "$protocol" "$source" "$destination" \
-                "$port_range" "$redirect_port" "$origin" "$status"
-
-            ((rule_count++))
-        done <<< "$rules"
-
-        echo "---------------------------------------------------------------------------------"
-        echo -e "${GREEN}共 $rule_count 条 IPv${IP_VERSION} 规则 | 🟢=活跃 🔴=非活跃${NC}"
-        total_rules=$((total_rules + rule_count))
-
-    if [ "$total_rules" -eq 0 ]; then
+    if [ $((total_rules_v4 + total_rules_v6)) -eq 0 ]; then
         echo -e "${YELLOW}未找到任何由本脚本创建的映射规则。${NC}"
     fi
 
