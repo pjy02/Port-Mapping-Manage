@@ -476,7 +476,7 @@ show_current_rules() {
             fi
 
             local status="🔴"
-            if check_rule_active "$port_range" "$redirect_port"; then
+            if check_rule_active "$port_range" "$redirect_port" "$ip_version"; then
                 status="🟢"
             fi
 
@@ -504,9 +504,15 @@ show_current_rules() {
 check_rule_active() {
     local port_range=$1
     local service_port=$2
+    local ip_version=$3
     
+    local ss_cmd="ss -ulnp"
+    if [ "$ip_version" = "6" ]; then
+        ss_cmd="ss -ulnp6"
+    fi
+
     # 检查服务端口是否在监听
-    if ss -ulnp | grep -q ":$service_port "; then
+    if $ss_cmd | grep -q ":$service_port "; then
         return 0
     fi
     return 1
