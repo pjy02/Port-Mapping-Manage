@@ -425,68 +425,77 @@ show_current_rules() {
     echo -e "${BLUE}=========================================${NC}"
     echo -e "${BLUE}      当前映射规则 (Enhanced View)${NC}"
     echo -e "${BLUE}=========================================${NC}"
-    
-        # 获取 PREROUTING 链全部规则（含脚本与外部），后续将区分来源
-    local rules=$(iptables -t nat -L PREROUTING -n --line-numbers)
-    
-    if [ -z "$rules" ]; then
-        echo -e "${YELLOW}未找到由本脚本创建的映射规则。${NC}"
-        return
-    fi
-    
-    # 表头
-        # 新增“来源”列，用于区分脚本创建与外部规则
-    # 使用无颜色表头以避免转义序列干扰列宽计算
-    printf "%-4s %-18s %-8s %-15s %-15s %-20s %-10s %-6s\n" \
-        "No." "Type" "Prot" "Source" "Destination" "PortRange" "DstPort" "From"
-    echo "---------------------------------------------------------------------------------"
-    
-    local rule_count=0
-    while IFS= read -r rule; do
-        # 跳过链头和标题行，避免误计数及错位
-        if [[ "$rule" =~ ^Chain[[:space:]] ]] || [[ "$rule" =~ ^num[[:space:]] ]]; then
+
+    local total_rules=0
+
+    for ip_version in 4 6; do
+        local iptables_cmd=$(get_iptables_cmd $ip_version)
+        if [ -z "$iptables_cmd" ]; then
             continue
         fi
-        local line_num=$(echo "$rule" | awk '{print $1}')
-        local target=$(echo "$rule" | awk '{print $2}')
-        local protocol=$(echo "$rule" | awk '{print $3}')
-        local source=$(echo "$rule" | awk '{print $4}')
-        local destination=$(echo "$rule" | awk '{print $5}')
-        # 判断规则来源
-        local origin="外部"
-        if echo "$rule" | grep -q "$RULE_COMMENT"; then
-            origin="脚本"
+
+        echo -e "\n${YELLOW}--- IPv${ip_version} 规则 ---${NC}"
+
+        local rules=$($iptables_cmd -t nat -L PREROUTING -n --line-numbers 2>/dev/null)
+
+        if [ -z "$rules" ] || [[ $(echo "$rules" | wc -l) -le 2 ]]; then
+            echo -e "${YELLOW}未找到 IPv${ip_version} 映射规则。${NC}"
+            continue
         fi
-        
-        # 提取端口信息
-        local port_range=""
-        if echo "$rule" | grep -q "dpts:"; then
-            port_range=$(echo "$rule" | sed -n 's/.*dpts:\([0-9]*:[0-9]*\).*/\1/p')
-        elif echo "$rule" | grep -q "dpt:"; then
-            port_range=$(echo "$rule" | sed -n 's/.*dpt:\([0-9]*\).*/\1/p')
-        fi
-        
-        local redirect_port=""
-        if echo "$rule" | grep -q "redir ports"; then
-            redirect_port=$(echo "$rule" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p')
-        fi
-        
-        # 状态检查
-        local status="🔴"
-        if check_rule_active "$port_range" "$redirect_port"; then
-            status="🟢"
-        fi
-        
-                        printf "%-4s %-18s %-8s %-15s %-15s %-20s %-10s %-6s %s\n" \
-            "$line_num" "$target" "$protocol" "$source" "$destination" \
-            "$port_range" "$redirect_port" "$origin" "$status"
-        
-        ((rule_count++))
-    done <<< "$rules"
-    
-    echo "---------------------------------------------------------------------------------"
-    echo -e "${GREEN}共 $rule_count 条规则 | 🟢=活跃 🔴=非活跃${NC}"
-    
+
+        printf "%-4s %-18s %-8s %-15s %-15s %-20s %-10s %-6s\n" \
+            "No." "Type" "Prot" "Source" "Destination" "PortRange" "DstPort" "From"
+        echo "---------------------------------------------------------------------------------"
+
+        local rule_count=0
+        while IFS= read -r rule; do
+            if [[ "$rule" =~ ^Chain[[:space:]] ]] || [[ "$rule" =~ ^num[[:space:]] ]]; then
+                continue
+            fi
+            
+            local line_num=$(echo "$rule" | awk '{print $1}')
+            local target=$(echo "$rule" | awk '{print $2}')
+            local protocol=$(echo "$rule" | awk '{print $3}')
+            local source=$(echo "$rule" | awk '{print $4}')
+            local destination=$(echo "$rule" | awk '{print $5}')
+            local origin="外部"
+            if echo "$rule" | grep -q "$RULE_COMMENT"; then
+                origin="脚本"
+            fi
+
+            local port_range=""
+            if echo "$rule" | grep -q "dpts:"; then
+                port_range=$(echo "$rule" | sed -n 's/.*dpts:\([0-9]*:[0-9]*\).*/\1/p')
+            elif echo "$rule" | grep -q "dpt:"; then
+                port_range=$(echo "$rule" | sed -n 's/.*dpt:\([0-9]*\).*/\1/p')
+            fi
+
+            local redirect_port=""
+            if echo "$rule" | grep -q "redir ports"; then
+                redirect_port=$(echo "$rule" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p')
+            fi
+
+            local status="🔴"
+            if check_rule_active "$port_range" "$redirect_port"; then
+                status="🟢"
+            fi
+
+            printf "%-4s %-18s %-8s %-15s %-15s %-20s %-10s %-6s %s\n" \
+                "$line_num" "$target" "$protocol" "$source" "$destination" \
+                "$port_range" "$redirect_port" "$origin" "$status"
+
+            ((rule_count++))
+        done <<< "$rules"
+
+        echo "---------------------------------------------------------------------------------"
+        echo -e "${GREEN}共 $rule_count 条 IPv${ip_version} 规则 | 🟢=活跃 🔴=非活跃${NC}"
+        total_rules=$((total_rules + rule_count))
+    done
+
+    if [ "$total_rules" -eq 0 ]; then
+        echo -e "${YELLOW}未找到任何由本脚本创建的映射规则。${NC}"
+    fi
+
     # 显示流量统计
     show_traffic_stats
 }
@@ -506,23 +515,34 @@ check_rule_active() {
 # 流量统计显示
 show_traffic_stats() {
     echo -e "\n${CYAN}流量统计概览：${NC}"
-    local total_packets=0
-    local total_bytes=0
-    
-    # 获取NAT表统计信息
-    while read -r line; do
-        if echo "$line" | grep -q "$RULE_COMMENT"; then
-            local packets=$(echo "$line" | awk '{print $1}' | tr -d '[]')
-            local bytes=$(echo "$line" | awk '{print $2}' | tr -d '[]')
-            if [[ "$packets" =~ ^[0-9]+$ ]] && [[ "$bytes" =~ ^[0-9]+$ ]]; then
-                total_packets=$((total_packets + packets))
-                total_bytes=$((total_bytes + bytes))
-            fi
+
+    for ip_version in 4 6; do
+        local iptables_cmd=$(get_iptables_cmd $ip_version)
+        if [ -z "$iptables_cmd" ]; then
+            continue
         fi
-    done < <(iptables -t nat -L PREROUTING -v -n)
-    
-    echo "总数据包: $total_packets"
-    echo "总字节数: $(format_bytes $total_bytes)"
+
+        local total_packets=0
+        local total_bytes=0
+
+        # 获取NAT表统计信息
+        while read -r line; do
+            if echo "$line" | grep -q "$RULE_COMMENT"; then
+                local packets=$(echo "$line" | awk '{print $1}' | tr -d '[]')
+                local bytes=$(echo "$line" | awk '{print $2}' | tr -d '[]')
+                if [[ "$packets" =~ ^[0-9]+$ ]] && [[ "$bytes" =~ ^[0-9]+$ ]]; then
+                    total_packets=$((total_packets + packets))
+                    total_bytes=$((total_bytes + bytes))
+                fi
+            fi
+        done < <($iptables_cmd -t nat -L PREROUTING -v -n 2>/dev/null)
+
+        if [ "$total_packets" -gt 0 ] || [ "$total_bytes" -gt 0 ]; then
+            echo -e "${YELLOW}--- IPv${ip_version} 流量 ---${NC}"
+            echo "总数据包: $total_packets"
+            echo "总字节数: $(format_bytes $total_bytes)"
+        fi
+    done
 }
 
 # 格式化字节显示
