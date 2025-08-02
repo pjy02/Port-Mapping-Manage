@@ -1,7 +1,7 @@
 #!/bin/bash
 # 一键安装脚本：下载 port_mapping_manager.sh 与 pmm 启动器并安装到 /usr/local/bin
 # 使用方式（示例）：
-#   bash <(curl -fsSL https://raw.githubusercontent.com/<USER>/<REPO>/main/install_pmm.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main/install_pmm.sh)
 # 安装完成后可直接执行： pmm
 
 set -euo pipefail
