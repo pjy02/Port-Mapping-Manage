@@ -1,0 +1,8 @@
+#!/bin/bash
+# 简易启动器：通过命令 pmm 快速调用 port_mapping_manager.sh
+# 使用方法：
+# 1. chmod +x pmm
+# 2. (可选) sudo ln -s $(pwd)/pmm /usr/local/bin/pmm  # 使其成为全局命令
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$SCRIPT_DIR/port_mapping_manager.sh" "$@"
