@@ -103,19 +103,38 @@ main() {
     detect_system
     check_dependencies
 
-    local files=("port_mapping_manager.sh" "pmm")
+    local core_script="pmm.sh"
+    local modules=("config.sh" "core.sh" "ui.sh" "utils.sh")
 
     info "正在下载最新脚本..."
-    for f in "${files[@]}"; do
-        info "  - $f"
-        curl -fsSL "$REMOTE_BASE/$f" -o "$TMP_DIR/$f"
-        chmod +x "$TMP_DIR/$f"
+    # 下载主脚本
+    info "  - $core_script"
+    curl -fsSL "$REMOTE_BASE/$core_script" -o "$TMP_DIR/$core_script"
+    chmod +x "$TMP_DIR/$core_script"
+
+    # 下载模块
+    mkdir -p "$TMP_DIR/modules"
+    for m in "${modules[@]}"; do
+        info "  - modules/$m"
+        curl -fsSL "$REMOTE_BASE/modules/$m" -o "$TMP_DIR/modules/$m"
     done
 
     info "复制文件到系统目录 (需要 root 权限)"
-    $SUDO mkdir -p "$SCRIPT_DIR" "$INSTALL_DIR"
-    $SUDO cp "$TMP_DIR/port_mapping_manager.sh" "$SCRIPT_DIR/port_mapping_manager.sh"
-    $SUDO cp "$TMP_DIR/pmm" "$INSTALL_DIR/pmm"
+    $SUDO mkdir -p "$SCRIPT_DIR/modules" "$INSTALL_DIR"
+    # 将主脚本和模块复制到目标位置
+    $SUDO cp "$TMP_DIR/$core_script" "$SCRIPT_DIR/pmm.sh"
+    $SUDO cp "$TMP_DIR/modules/"* "$SCRIPT_DIR/modules/"
+
+    # 创建一个指向主脚本的包装器，并放置在 $INSTALL_DIR
+    cat <<EOF | $SUDO tee "$INSTALL_DIR/pmm" > /dev/null
+#!/bin/bash
+# Wrapper script to execute Port Mapping Manager
+exec "$SCRIPT_DIR/pmm.sh" "\$@"
+EOF
+
+    # 赋予执行权限
+    $SUDO chmod +x "$SCRIPT_DIR/pmm.sh"
+    $SUDO chmod +x "$INSTALL_DIR/pmm"
 
     rm -rf "$TMP_DIR"
     info "安装完成！现在可在任何目录直接运行： pmm"
