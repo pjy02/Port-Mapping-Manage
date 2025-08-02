@@ -1,4 +1,4 @@
-# Enhanced UDP/TCP Port Mapping Script
+# Port-Mapping-Manage
 
 [![Version](https://img.shields.io/badge/version-3.1-blue)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/port_mapping_manager.sh)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/LICENSE)
