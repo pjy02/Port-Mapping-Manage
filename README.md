@@ -22,14 +22,8 @@
 > 需 **root** 权限执行，确保系统已安装 `iptables` / `iptables-save` / `iptables-restore`。
 
 ```bash
-# 下载脚本（示例）
-wget -O enhanced_udp_mapping.sh https://raw.githubusercontent.com/yourrepo/enhanced_udp_mapping/main/enhanced_udp_mapping.sh
-
-# 赋予执行权限
-chmod +x enhanced_udp_mapping.sh
-
-# 运行脚本（默认正常模式）
-./enhanced_udp_mapping.sh
+# 一键下载并运行（示例）
+bash <(curl -sL https://raw.githubusercontent.com/yourrepo/port-mapping-manager/main/port_mapping_manager.sh)
 ```
 
 ### 可选启动参数
