@@ -17,7 +17,7 @@ REMOTE_BASE="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main"  
 INSTALL_DIR="/usr/local/bin"
 SCRIPT_DIR="/etc/port_mapping_manager"
 TMP_DIR="$(mktemp -d)"
-REQUIRED_CMDS=(curl iptables iptables-save iptables-restore)
+REQUIRED_CMDS=(curl iptables ip6tables iptables-save iptables-restore ip6tables-save ip6tables-restore)
 ##############################################################################
 
 # --------------------------- 日志输出辅助 -----------------------------------

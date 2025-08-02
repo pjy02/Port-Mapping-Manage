@@ -26,6 +26,7 @@ PACKAGE_MANAGER=""
 PERSISTENT_METHOD=""
 VERBOSE_MODE=false
 AUTO_BACKUP=true
+IP_VERSION="4" # 默认使用IPv4
 
 # --- 日志和安全函数 ---
 
@@ -78,7 +79,29 @@ detect_system() {
         PERSISTENT_METHOD="manual"
     fi
     
+    # 检测ip6tables持久化方法
+    if command -v netfilter-persistent &> /dev/null; then
+        PERSISTENT_METHOD_V6="netfilter-persistent"
+    elif command -v service &> /dev/null && [ -f "/etc/init.d/ip6tables" ]; then
+        PERSISTENT_METHOD_V6="service"
+    elif command -v systemctl &> /dev/null; then
+        PERSISTENT_METHOD_V6="systemd"
+    else
+        PERSISTENT_METHOD_V6="manual"
+    fi
+    
+    log_message "INFO" "IPv6 持久化方法: $PERSISTENT_METHOD_V6"
+    
     log_message "INFO" "系统检测: 包管理器=$PACKAGE_MANAGER, 持久化方法=$PERSISTENT_METHOD"
+}
+
+# 根据IP版本获取正确的iptables命令
+get_iptables_cmd() {
+    if [ "$IP_VERSION" = "6" ]; then
+        echo "ip6tables"
+    else
+        echo "iptables"
+    fi
 }
 
 # 检查root权限
@@ -137,7 +160,7 @@ interactive_cleanup_backups() {
 # 增强的依赖检查
 check_dependencies() {
     local missing_deps=()
-    local required_commands=("iptables" "iptables-save" "ss" "grep" "awk" "sed")
+    local required_commands=("iptables" "ip6tables" "iptables-save" "ip6tables-save" "ss" "grep" "awk" "sed")
     
     for cmd in "${required_commands[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
@@ -152,7 +175,8 @@ check_dependencies() {
     fi
     
     # 检查iptables功能
-    if ! iptables -t nat -L >/dev/null 2>&1; then
+        local ipt_cmd=$(get_iptables_cmd)
+    if ! $ipt_cmd -t nat -L >/dev/null 2>&1; then
         echo -e "${RED}错误：iptables NAT 功能不可用，可能需要加载内核模块。${NC}"
         echo -e "尝试执行: ${YELLOW}modprobe iptable_nat${NC}"
         exit 1
@@ -732,26 +756,40 @@ show_manual_save_instructions() {
 
 # 增强的规则保存
 save_rules() {
-    echo "正在保存iptables规则..."
+    local iptables_save_cmd
+    local rules_file
+    local effective_persistent_method
+
+    if [ "$IP_VERSION" = "6" ]; then
+        iptables_save_cmd="ip6tables-save"
+        rules_file="$CONFIG_DIR/current.rules.v6"
+        effective_persistent_method=$PERSISTENT_METHOD_V6
+    else
+        iptables_save_cmd="iptables-save"
+        rules_file="$CONFIG_DIR/current.rules.v4"
+        effective_persistent_method=$PERSISTENT_METHOD
+    fi
+
+    echo "正在保存iptables规则 (IP v${IP_VERSION})..."
     
-    case $PERSISTENT_METHOD in
+    case $effective_persistent_method in
         "netfilter-persistent")
-            if netfilter-persistent save; then
-                echo -e "${GREEN}✓ 规则已通过netfilter-persistent永久保存${NC}"
-                log_message "INFO" "规则永久保存成功"
-                return 0
+            if $iptables_save_cmd > /dev/null; then # just to check if command works
+                 netfilter-persistent save
+                 echo -e "${GREEN}✓ 规则已通过netfilter-persistent永久保存${NC}"
+                 log_message "INFO" "规则永久保存成功 (v${IP_VERSION})"
+                 return 0
             fi
             ;;
         "service")
-            if service iptables save 2>/dev/null; then
+            if service $iptables_save_cmd save 2>/dev/null; then
                 echo -e "${GREEN}✓ 规则已通过service命令永久保存${NC}"
-                log_message "INFO" "规则永久保存成功"
+                log_message "INFO" "规则永久保存成功 (v${IP_VERSION})"
                 return 0
             fi
             ;;
         "systemd")
-            local rules_file="$CONFIG_DIR/current.rules"
-            if iptables-save > "$rules_file"; then
+            if $iptables_save_cmd > "$rules_file"; then
                 echo -e "${GREEN}✓ 规则已保存到 $rules_file${NC}"
                 log_message "INFO" "规则保存到文件: $rules_file"
                 return 0
@@ -760,7 +798,7 @@ save_rules() {
     esac
     
     echo -e "${RED}✗ 规则保存失败${NC}"
-    log_message "ERROR" "规则保存失败"
+    log_message "ERROR" "规则保存失败 (v${IP_VERSION})"
     show_manual_save_instructions
     return 1
 }
@@ -1000,6 +1038,7 @@ edit_rules() {
 
 # 删除指定规则
 delete_specific_rule() {
+    local iptables_cmd=$(get_iptables_cmd)
     # 收集所有 UDP REDIRECT 规则（包含脚本与外部）
     local rules=()
     local origins=()
@@ -1015,7 +1054,7 @@ delete_specific_rule() {
         else
             origins+=("外部")
         fi
-    done < <(iptables -t nat -L PREROUTING --line-numbers | grep "REDIRECT")
+    done < <($iptables_cmd -t nat -L PREROUTING --line-numbers | grep "REDIRECT")
 
     if [ ${#rules[@]} -eq 0 ]; then
         echo -e "${YELLOW}没有可删除的规则${NC}"
@@ -1024,7 +1063,7 @@ delete_specific_rule() {
 
     echo -e "${BLUE}请选择要删除的规则:${NC}"
     for i in "${!rules[@]}"; do
-        local rule_info=$(iptables -t nat -L PREROUTING --line-numbers | grep "^${rules[$i]} ")
+        local rule_info=$($iptables_cmd -t nat -L PREROUTING --line-numbers | grep "^${rules[$i]} ")
         echo "$((i+1)). [${origins[$i]}] $rule_info"
     done
 
@@ -1076,7 +1115,7 @@ delete_specific_rule() {
             fi
         fi
 
-        if iptables -t nat -D PREROUTING "$rule_num"; then
+        if $iptables_cmd -t nat -D PREROUTING "$rule_num"; then
             echo -e "${GREEN}✓ 已删除规则 #$rule_num${NC}"
             log_message "INFO" "删除规则: 行号 $rule_num"
         else
@@ -1130,9 +1169,10 @@ restore_defaults() {
 
 # 仅删除映射规则
 remove_mapping_rules() {
+    local iptables_cmd=$(get_iptables_cmd)
     echo "正在查找并删除端口映射规则..."
     
-    local rule_lines=($(iptables -t nat -L PREROUTING --line-numbers | grep "$RULE_COMMENT" | awk '{print $1}' | sort -nr))
+    local rule_lines=($($iptables_cmd -t nat -L PREROUTING --line-numbers | grep "$RULE_COMMENT" | awk '{print $1}' | sort -nr))
     
     if [ ${#rule_lines[@]} -eq 0 ]; then
         echo -e "${GREEN}未找到需要删除的映射规则${NC}"
@@ -1159,7 +1199,7 @@ remove_mapping_rules() {
     local failed_count=0
     
     for line_num in "${rule_lines[@]}"; do
-        if iptables -t nat -D PREROUTING "$line_num" 2>/dev/null; then
+        if $iptables_cmd -t nat -D PREROUTING "$line_num" 2>/dev/null; then
             echo -e "${GREEN}✓ 删除规则 #${line_num}${NC}"
             ((deleted_count++))
         else
@@ -1209,18 +1249,19 @@ full_reset_iptables() {
     
     echo "正在重置iptables..."
     
+    local iptables_cmd=$(get_iptables_cmd)
     # 清空所有规则
-    iptables -F
-    iptables -X
-    iptables -t nat -F
-    iptables -t nat -X
-    iptables -t mangle -F
-    iptables -t mangle -X
+    $iptables_cmd -F
+    $iptables_cmd -X
+    $iptables_cmd -t nat -F
+    $iptables_cmd -t nat -X
+    $iptables_cmd -t mangle -F
+    $iptables_cmd -t mangle -X
     
     # 设置默认策略
-    iptables -P INPUT ACCEPT
-    iptables -P FORWARD ACCEPT
-    iptables -P OUTPUT ACCEPT
+    $iptables_cmd -P INPUT ACCEPT
+    $iptables_cmd -P FORWARD ACCEPT
+    $iptables_cmd -P OUTPUT ACCEPT
     
     echo -e "${GREEN}✓ iptables已完全重置${NC}"
     log_message "WARNING" "iptables已完全重置"
@@ -1242,9 +1283,10 @@ uninstall_script() {
 
     # 1. 删除脚本规则
     echo "正在删除脚本创建的 iptables 规则..."
-    local rule_lines=( $(iptables -t nat -L PREROUTING --line-numbers | grep "$RULE_COMMENT" | awk '{print $1}' | sort -nr) )
+    local iptables_cmd=$(get_iptables_cmd)
+    local rule_lines=( $($iptables_cmd -t nat -L PREROUTING --line-numbers | grep "$RULE_COMMENT" | awk '{print $1}' | sort -nr) )
     for line_num in "${rule_lines[@]}"; do
-        iptables -t nat -D PREROUTING "$line_num" 2>/dev/null && echo "  - 删除规则 #$line_num"
+        $iptables_cmd -t nat -D PREROUTING "$line_num" 2>/dev/null && echo "  - 删除规则 #$line_num"
     done
 
     # 2. 询问是否保存当前状态
@@ -1323,11 +1365,24 @@ show_version() {
     echo "v2.0 - 原始版本，基础端口映射功能"
 }
 
+# 切换IP版本
+switch_ip_version() {
+    if [ "$IP_VERSION" = "4" ]; then
+        IP_VERSION="6"
+        echo -e "${GREEN}已切换到 IPv6 模式${NC}"
+    else
+        IP_VERSION="4"
+        echo -e "${GREEN}已切换到 IPv4 模式${NC}"
+    fi
+    log_message "INFO" "IP版本切换至: IPv${IP_VERSION}"
+}
+
 # 主菜单
 show_main_menu() {
     clear
+    local ip_version_str="IPv${IP_VERSION}"
     echo -e "${GREEN}=========================================${NC}"
-    echo -e "${GREEN}  UDP端口映射管理脚本 Enhanced v${SCRIPT_VERSION}${NC}"
+    echo -e "${GREEN}  UDP端口映射管理脚本 Enhanced v${SCRIPT_VERSION}  [当前: ${ip_version_str}]${NC}"
     echo -e "${GREEN}=========================================${NC}"
     echo
     echo -e "${BLUE}主要功能:${NC}"
@@ -1347,7 +1402,8 @@ show_main_menu() {
     echo " 10. 永久保存当前规则"
     echo " 11. 帮助信息"
     echo " 12. 版本信息"
-    echo " 13. 退出脚本"
+    echo " 13. 切换IP版本 (IPv4/IPv6)"
+    echo " 14. 退出脚本"
     echo " 99. 卸载脚本"
     echo
     echo "-----------------------------------------"
@@ -1461,7 +1517,7 @@ initialize_script() {
 main_loop() {
     while true; do
         show_main_menu
-        read -p "请选择操作 [1-13/99]: " main_choice
+        read -p "请选择操作 [1-14/99]: " main_choice
         
         case $main_choice in
             1) setup_mapping ;;
@@ -1476,7 +1532,8 @@ main_loop() {
             10) save_rules ;;
             11) show_enhanced_help ;;
             12) show_version ;;
-            13)
+            13) switch_ip_version ;;
+            14)
                 echo -e "${GREEN}感谢使用UDP端口映射脚本！${NC}"
                 log_message "INFO" "脚本正常退出"
                 exit 0
@@ -1485,7 +1542,7 @@ main_loop() {
                 uninstall_script
                 ;;
             *) 
-                echo -e "${RED}无效选择，请输入 1-13 或 99${NC}"
+                echo -e "${RED}无效选择，请输入 1-14 或 99${NC}"
                 ;;
         esac
         
