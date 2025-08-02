@@ -683,8 +683,13 @@ add_mapping_rule() {
 
     echo "正在添加端口映射规则..."
     
+    # 根据IP_VERSION获取对应的iptables命令
+    local iptables_cmd=$(get_iptables_cmd)
+
+    echo "正在添加端口映射规则..."
+
     # 添加规则
-    if iptables -t nat -A PREROUTING -p $protocol --dport "$start_port:$end_port" \
+    if $iptables_cmd -t nat -A PREROUTING -p $protocol --dport "$start_port:$end_port" \
        -m comment --comment "$RULE_COMMENT" \
        -j REDIRECT --to-port "$service_port" 2>/dev/null; then
         
