@@ -103,19 +103,28 @@ main() {
     detect_system
     check_dependencies
 
-    local files=("port_mapping_manager.sh" "pmm")
+    local script_files=("port_mapping_manager.sh" "pmm")
+    local lib_files=("libs/lib_core.sh" "libs/lib_iptables.sh" "libs/lib_ui.sh" "libs/lib_utils.sh")
 
     info "正在下载最新脚本..."
-    for f in "${files[@]}"; do
+    for f in "${script_files[@]}"; do
         info "  - $f"
         curl -fsSL "$REMOTE_BASE/$f" -o "$TMP_DIR/$f"
         chmod +x "$TMP_DIR/$f"
     done
 
+    info "正在下载库文件..."
+    mkdir -p "$TMP_DIR/libs"
+    for f in "${lib_files[@]}"; do
+        info "  - $f"
+        curl -fsSL "$REMOTE_BASE/$f" -o "$TMP_DIR/$f"
+    done
+
     info "复制文件到系统目录 (需要 root 权限)"
-    $SUDO mkdir -p "$SCRIPT_DIR" "$INSTALL_DIR"
+    $SUDO mkdir -p "$SCRIPT_DIR/libs" "$INSTALL_DIR"
     $SUDO cp "$TMP_DIR/port_mapping_manager.sh" "$SCRIPT_DIR/port_mapping_manager.sh"
     $SUDO cp "$TMP_DIR/pmm" "$INSTALL_DIR/pmm"
+    $SUDO cp "$TMP_DIR/libs/"*.sh "$SCRIPT_DIR/libs/"
 
     rm -rf "$TMP_DIR"
     info "安装完成！现在可在任何目录直接运行： pmm"
