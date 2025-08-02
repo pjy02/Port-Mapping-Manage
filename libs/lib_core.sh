@@ -31,84 +31,84 @@ save_config() {
     log_message "INFO" "Configuration saved to $CONFIG_FILE"
 }
 
-# --- Rule Management Logic ---
+# --- 规则管理逻辑 ---
 setup_mapping() {
     local ip_version proto from_port to_port validation_status
 
-    read -p "Enter IP version (4 for IPv4, 6 for IPv6): " ip_version
+    read -p "输入IP版本 (4 代表 IPv4, 6 代表 IPv6): " ip_version
     if [[ "$ip_version" != "4" && "$ip_version" != "6" ]]; then
-        echo -e "${C_RED}Invalid IP version. Please enter '4' or '6'.${C_RESET}"
+        echo -e "${C_RED}无效的IP版本。请输入 '4' 或 '6'。${C_RESET}"
         return
     fi
     if [[ "$ip_version" == "6" ]] && ! command -v ip6tables &>/dev/null; then
-        echo -e "${C_RED}ip6tables command not found. Cannot manage IPv6 rules.${C_RESET}"
+        echo -e "${C_RED}未找到ip6tables命令。无法管理IPv6规则。${C_RESET}"
         return
     fi
     IPTABLES_COMMAND=$([[ "$ip_version" == "6" ]] && echo "ip6tables" || echo "iptables")
 
-    read -p "Enter protocol (udp/tcp): " proto
+    read -p "输入协议 (udp/tcp): " proto
     proto=$(echo "$proto" | tr '[:upper:]' '[:lower:]')
     if [[ "$proto" != "udp" && "$proto" != "tcp" ]]; then
-        echo -e "${C_RED}Invalid protocol. Please enter 'udp' or 'tcp'.${C_RESET}"
+        echo -e "${C_RED}无效的协议。请输入 'udp' 或 'tcp'。${C_RESET}"
         return
     fi
 
-    read -p "Enter source port to map from (1-65535): " from_port
+    read -p "输入要映射的源端口 (1-65535): " from_port
     validation_status=$(validate_port "$from_port" "$proto")
     if [[ "$validation_status" == "invalid" ]]; then
-        echo -e "${C_RED}Invalid source port number.${C_RESET}"
+        echo -e "${C_RED}无效的源端口号。${C_RESET}"
         return
     elif [[ "$validation_status" == "listening" ]]; then
-        echo -e "${C_RED}Error: Source port $from_port is already in use.${C_RESET}"
+        echo -e "${C_RED}错误: 源端口 $from_port 已被占用。${C_RESET}"
         return
     elif [[ "$validation_status" == "reserved" ]]; then
-        echo -e "${C_YELLOW}Warning: Source port $from_port is in the system-reserved range (< 1024).${C_RESET}"
+        echo -e "${C_YELLOW}警告: 源端口 $from_port 位于系统保留范围 (< 1024)。${C_RESET}"
     fi
 
-    read -p "Enter destination port to map to (1-65535): " to_port
+    read -p "输入要映射到的目标端口 (1-65535): " to_port
     validation_status=$(validate_port "$to_port")
     if [[ "$validation_status" == "invalid" ]]; then
-        echo -e "${C_RED}Invalid destination port number.${C_RESET}"
+        echo -e "${C_RED}无效的目标端口号。${C_RESET}"
         return
     fi
 
     if [[ "$from_port" == "$to_port" ]]; then
-        echo -e "${C_RED}Source and destination ports cannot be the same.${C_RESET}"
+        echo -e "${C_RED}源端口和目标端口不能相同。${C_RESET}"
         return
     fi
 
-    echo -e "${C_YELLOW}You are about to add the following mapping:${C_RESET}"
-    echo -e "  Version:   ${C_CYAN}IPv$ip_version${C_RESET}"
-    echo -e "  Protocol:  ${C_CYAN}$proto${C_RESET}"
-    echo -e "  From Port: ${C_CYAN}$from_port${C_RESET}"
-    echo -e "  To Port:   ${C_CYAN}$to_port${C_RESET}"
-    read -p "Confirm? (y/n): " confirm
+    echo -e "${C_YELLOW}您将要添加以下映射:${C_RESET}"
+    echo -e "  版本:   ${C_CYAN}IPv$ip_version${C_RESET}"
+    echo -e "  协议:  ${C_CYAN}$proto${C_RESET}"
+    echo -e "  源端口: ${C_CYAN}$from_port${C_RESET}"
+    echo -e "  目标端口:   ${C_CYAN}$to_port${C_RESET}"
+    read -p "确认? (y/n): " confirm
 
     if [[ "$confirm" == "y" ]]; then
-        backup_rules # Auto-backup before making changes
+        backup_rules # 在做更改前自动备份
         if add_iptables_rule "$proto" "$from_port" "$to_port"; then
-            MAPPINGS+=("$ip_version:$proto:$from_port:$to_port:enabled") # Add status
+            MAPPINGS+=("$ip_version:$proto:$from_port:$to_port:enabled") # 添加状态
             save_config
-            read -p "Do you want to make this rule persistent across reboots? (y/n): " persist
+            read -p "您想让此规则在重启后也保持生效吗? (y/n): " persist
             if [[ "$persist" == "y" ]]; then
                 save_rules_persistent "adding new rule"
             fi
         fi
     else
-        echo "Operation cancelled."
+        echo "操作已取消。"
     fi
 }
 
 delete_specific_rule() {
     if [ ${#MAPPINGS[@]} -eq 0 ]; then
-        echo -e "${C_YELLOW}No managed mapping rules to delete.${C_RESET}"
+        echo -e "${C_YELLOW}没有可删除的托管映射规则。${C_RESET}"
         return
     fi
 
-    echo -e "${C_PURPLE}Select a rule to PERMANENTLY delete:${C_RESET}"
-    select mapping_choice in "${MAPPINGS[@]}" "Cancel"; do
-        if [[ "$mapping_choice" == "Cancel" ]]; then
-            echo "Cancelled."
+    echo -e "${C_PURPLE}选择要永久删除的规则:${C_RESET}"
+    select mapping_choice in "${MAPPINGS[@]}" "取消"; do
+        if [[ "$mapping_choice" == "取消" ]]; then
+            echo "已取消。"
             break
         fi
         if [ -n "$mapping_choice" ]; then
@@ -116,51 +116,51 @@ delete_specific_rule() {
             
             IPTABLES_COMMAND=$([[ "$ip_version" == "6" ]] && echo "ip6tables" || echo "iptables")
 
-            # Even if the rule is 'disabled', we must ensure it's removed from iptables
-            # because a disabled rule might not be in iptables, and that's okay.
-            disable_iptables_rule "$proto" "$from_port" "$to_port" # Ensure it's not active
+            # 即使规则是 'disabled'，我们也必须确保它从iptables中移除
+            # 因为一个禁用的规则可能不在iptables中，这没关系。
+            disable_iptables_rule "$proto" "$from_port" "$to_port" # 确保它不活跃
             
-            # Remove from array
+            # 从数组中移除
             local new_mappings=()
             for item in "${MAPPINGS[@]}"; do
                 [[ "$item" != "$mapping_choice" ]] && new_mappings+=("$item")
             done
             MAPPINGS=("${new_mappings[@]}")
             save_config
-            echo -e "${C_GREEN}Rule '$mapping_choice' permanently removed from configuration.${C_RESET}"
+            echo -e "${C_GREEN}规则 '$mapping_choice' 已从配置中永久移除。${C_RESET}"
             
-            read -p "Do you want to save the rule deletion permanently (update persistent rules)? (y/n): " persist
+            read -p "您想永久保存规则删除吗 (更新持久化规则)？ (y/n): " persist
             if [[ "$persist" == "y" ]]; then
                 save_rules_persistent "deleting rule"
             fi
             break
         else
-            echo -e "${C_RED}Invalid selection.${C_RESET}"
+            echo -e "${C_RED}无效的选择。${C_RESET}"
         fi
     done
 }
 
 toggle_rule_menu() {
     if [ ${#MAPPINGS[@]} -eq 0 ]; then
-        echo -e "${C_YELLOW}No managed mapping rules to toggle.${C_RESET}"
+        echo -e "${C_YELLOW}没有可切换状态的托管映射规则。${C_RESET}"
         return
     fi
 
-    echo -e "${C_PURPLE}Select a rule to enable/disable:${C_RESET}"
-    # Adding an index to the select prompt for clarity
+    echo -e "${C_PURPLE}选择一个规则以启用/禁用:${C_RESET}"
+    # 为了清晰，在选择提示中添加一个索引
     local options=()
     for i in "${!MAPPINGS[@]}"; do
         options+=("$((i+1))) ${MAPPINGS[$i]}")
     done
-    options+=("Cancel")
+    options+=("取消")
 
     select choice in "${options[@]}"; do
-        if [[ "$choice" == "Cancel" ]]; then
-            echo "Cancelled."
+        if [[ "$choice" == "取消" ]]; then
+            echo "已取消。"
             break
         fi
         
-        # Extract the index from the choice string
+        # 从选择的字符串中提取索引
         local index=$(echo "$choice" | awk '{print $1}' | sed 's/)//')
         if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#MAPPINGS[@]} ]; then
             local selected_mapping_index=$((index - 1))
@@ -170,20 +170,8 @@ toggle_rule_menu() {
             IPTABLES_COMMAND=$([[ "$ip_version" == "6" ]] && echo "ip6tables" || echo "iptables")
             
             if toggle_rule_status "$proto" "$from_port" "$to_port" "$status"; then
-                # Update status in the array
-                local new_status=$([[ "$status" == "enabled" ]] && echo "disabled" || echo "enabled")
-                MAPPINGS[$selected_mapping_index]="$ip_version:$proto:$from_port:$to_port:$new_status"
-                save_config
-                echo -e "${C_GREEN}Rule status updated in configuration.${C_RESET}"
-            else
-                echo -e "${C_RED}Failed to toggle rule status. Configuration not changed.${C_RESET}"
-            fi
-            break
-        else
-            echo -e "${C_RED}Invalid selection.${C_RESET}"
-        fi
-    done
-}
+                # 更新数组中的状态
+                local new_status=$([[ "$status"
 
 # --- Bulk Operations ---
 bulk_import_from_file() {
@@ -282,13 +270,13 @@ diagnose_system() {
     echo -e "${C_BLUE}--- Diagnostics Complete ---${C_RESET}"
 }
 
-# --- Cleanup ---
+# --- 清理 ---
 uninstall_script() {
-    echo -e "${C_RED}This will remove all managed rules, config files, and the script itself.${C_RESET}"
-    read -p "Are you sure you want to uninstall? (y/n): " confirm
-    if [[ "$confirm" != "y" ]]; then echo "Uninstall cancelled."; return; fi
+    echo -e "${C_RED}这将删除所有托管的规则、配置文件和脚本本身。${C_RESET}"
+    read -p "您确定要卸载吗? (y/n): " confirm
+    if [[ "$confirm" != "y" ]]; then echo "卸载已取消。"; return; fi
 
-    # Remove rules
+    # 删除规则
     for mapping in "${MAPPINGS[@]}"; do
         IFS=':' read -r ip_version proto from_port to_port <<< "$mapping"
         if [[ "$ip_version" == "6" ]]; then
@@ -299,14 +287,14 @@ uninstall_script() {
         delete_iptables_rule "$proto" "$from_port" "$to_port"
     done
 
-    read -p "Save rule deletions permanently? (y/n): " save_confirm
+    read -p "是否永久保存规则删除? (y/n): " save_confirm
     if [[ "$save_confirm" == "y" ]]; then save_rules_persistent "uninstalling"; fi
 
-    # Remove files
+    # 删除文件
     rm -rf "$CONFIG_DIR"
     rm -f "$LOG_FILE"
     rm -f /usr/local/bin/pmm
     rm -f /usr/local/bin/port_mapping_manager.sh
 
-    echo -e "${C_GREEN}Port Mapping Manager has been uninstalled.${C_RESET}"
+    echo -e "${C_GREEN}端口映射管理器已卸载。${C_RESET}"
 }

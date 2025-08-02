@@ -2,12 +2,12 @@
 
 # libs/lib_iptables.sh
 #
-# Functions for interacting with iptables
+# 与 iptables 交互的函数
 
 # Source utility functions
 source "$(dirname "$0")/lib_utils.sh"
 
-# Global variable to hold the correct iptables command
+# 用于保存正确iptables命令的全局变量
 IPTABLES_COMMAND="iptables"
 
 # --- Error Handling for iptables ---
@@ -16,18 +16,18 @@ handle_iptables_error() {
     local command_output=$2
     local action=$3
 
-    log_message "ERROR" "iptables command failed with exit code $exit_code while $action."
-    log_message "ERROR" "Output: $command_output"
+    log_message "错误" "iptables 命令执行失败，退出代码 $exit_code，操作：$action。"
+    log_message "错误" "输出: $command_output"
 
-    echo -e "${C_RED}Error: Failed to $action. (Exit code: $exit_code)${C_RESET}"
-    echo -e "${C_YELLOW}Details: $command_output${C_RESET}"
+    echo -e "${C_RED}错误: 操作失败: $action。(退出代码: $exit_code)${C_RESET}"
+    echo -e "${C_YELLOW}详情: $command_output${C_RESET}"
 
     if [[ "$command_output" == *"No chain/target/match by that name"* ]]; then
-        echo -e "${C_CYAN}Suggestion: This may be caused by a missing kernel module. Try running 'modprobe xt_REDIRECT'.${C_RESET}"
+        echo -e "${C_CYAN}建议: 这可能是由于缺少内核模块引起的。请尝试运行 'modprobe xt_REDIRECT'。${C_RESET}"
     elif [[ "$command_output" == *"rule in chain PREROUTING already exists"* ]]; then
-        echo -e "${C_CYAN}Suggestion: The exact same rule already exists. No action needed.${C_RESET}"
+        echo -e "${C_CYAN}建议: 完全相同的规则已经存在。无需操作。${C_RESET}"
     else
-        echo -e "${C_CYAN}Suggestion: Check your system's iptables setup and kernel logs ('dmesg') for more information.${C_RESET}"
+        echo -e "${C_CYAN}建议: 请检查您系统的 iptables 设置和内核日志 ('dmesg') 以获取更多信息。${C_RESET}"
     fi
 }
 
@@ -36,7 +36,7 @@ check_rule_active() {
     local proto=$1
     local from_port=$2
     local to_port=$3
-    # A simplified check looking for the core components of the rule
+    # 一个简化的检查，查找规则的核心组件
     $IPTABLES_COMMAND -t nat -L PREROUTING -v -n --line-numbers 2>/dev/null | grep -q "REDIRECT.*$proto.*dpt:$from_port.*redir ports $to_port"
 }
 
@@ -50,7 +50,7 @@ enable_iptables_rule() {
     local exit_code=$?
 
     if [ $exit_code -ne 0 ]; then
-        handle_iptables_error "$exit_code" "$command_output" "enabling rule for $proto $from_port -> $to_port"
+        handle_iptables_error "$exit_code" "$command_output" "启用规则 $proto $from_port -> $to_port"
         return 1
     fi
     return 0
@@ -66,7 +66,7 @@ disable_iptables_rule() {
     local exit_code=$?
 
     if [ $exit_code -ne 0 ]; then
-        handle_iptables_error "$exit_code" "$command_output" "disabling rule for $proto $from_port -> $to_port"
+        handle_iptables_error "$exit_code" "$command_output" "禁用规则 $proto $from_port -> $to_port"
         return 1
     fi
     return 0
@@ -74,8 +74,8 @@ disable_iptables_rule() {
 
 add_iptables_rule() {
     if enable_iptables_rule "$1" "$2" "$3"; then
-        log_message "SUCCESS" "Added mapping: $1 from $2 to $3."
-        echo -e "${C_GREEN}Successfully added mapping rule.${C_RESET}"
+        log_message "成功" "已添加映射: $1 从 $2 到 $3。"
+        echo -e "${C_GREEN}成功添加映射规则。${C_RESET}"
         return 0
     else
         return 1
@@ -84,8 +84,8 @@ add_iptables_rule() {
 
 delete_iptables_rule() {
     if disable_iptables_rule "$1" "$2" "$3"; then
-        log_message "SUCCESS" "Deleted mapping: $1 from $2 to $3."
-        echo -e "${C_GREEN}Successfully deleted mapping rule.${C_RESET}"
+        log_message "成功" "已删除映射: $1 从 $2 到 $3。"
+        echo -e "${C_GREEN}成功删除映射规则。${C_RESET}"
         return 0
     else
         return 1
@@ -100,22 +100,22 @@ toggle_rule_status() {
 
     if [[ "$current_status" == "enabled" ]]; then
         if disable_iptables_rule "$proto" "$from_port" "$to_port"; then
-            log_message "SUCCESS" "Disabled rule: $proto $from_port -> $to_port"
-            echo -e "${C_GREEN}Rule disabled.${C_RESET}"
+            log_message "成功" "已禁用规则: $proto $from_port -> $to_port"
+            echo -e "${C_GREEN}规则已禁用。${C_RESET}"
             return 0
         else
-            log_message "ERROR" "Failed to disable rule: $proto $from_port -> $to_port"
-            echo -e "${C_RED}Failed to disable rule.${C_RESET}"
+            log_message "错误" "禁用规则失败: $proto $from_port -> $to_port"
+            echo -e "${C_RED}禁用规则失败。${C_RESET}"
             return 1
         fi
-    else # It's disabled, so enable it
+    else # 禁用状态，所以启用它
         if enable_iptables_rule "$proto" "$from_port" "$to_port"; then
-            log_message "SUCCESS" "Enabled rule: $proto $from_port -> $to_port"
-            echo -e "${C_GREEN}Rule enabled.${C_RESET}"
+            log_message "成功" "已启用规则: $proto $from_port -> $to_port"
+            echo -e "${C_GREEN}规则已启用。${C_RESET}"
             return 0
         else
-            log_message "ERROR" "Failed to enable rule: $proto $from_port -> $to_port"
-            echo -e "${C_RED}Failed to enable rule.${C_RESET}"
+            log_message "错误" "启用规则失败: $proto $from_port -> $to_port"
+            echo -e "${C_RED}启用规则失败。${C_RESET}"
             return 1
         fi
     fi
@@ -129,114 +129,114 @@ backup_rules() {
     
     local success=true
     if iptables-save > "$backup_file_v4"; then
-        echo -e "${C_GREEN}IPv4 rules backed up to $backup_file_v4${C_RESET}"
-        log_message "INFO" "Created IPv4 backup at $backup_file_v4"
+        echo -e "${C_GREEN}IPv4 规则已备份到 $backup_file_v4${C_RESET}"
+        log_message "信息" "已在 $backup_file_v4 创建 IPv4 备份"
     else
-        echo -e "${C_RED}Error: Failed to backup IPv4 rules.${C_RESET}"
-        log_message "ERROR" "Failed to create IPv4 backup."
+        echo -e "${C_RED}错误：备份 IPv4 规则失败。${C_RESET}"
+        log_message "错误" "创建 IPv4 备份失败。"
         success=false
     fi
 
     if command -v ip6tables-save &>/dev/null; then
         if ip6tables-save > "$backup_file_v6"; then
-            echo -e "${C_GREEN}IPv6 rules backed up to $backup_file_v6${C_RESET}"
-            log_message "INFO" "Created IPv6 backup at $backup_file_v6"
+            echo -e "${C_GREEN}IPv6 规则已备份到 $backup_file_v6${C_RESET}"
+            log_message "信息" "已在 $backup_file_v6 创建 IPv6 备份"
         else
-            echo -e "${C_RED}Error: Failed to backup IPv6 rules.${C_RESET}"
-            log_message "ERROR" "Failed to create IPv6 backup."
+            echo -e "${C_RED}错误：备份 IPv6 规则失败。${C_RESET}"
+            log_message "错误" "创建 IPv6 备份失败。"
             success=false
         fi
     fi
     
     if [ "$success" = true ]; then
-        echo -e "${C_GREEN}Backup process completed.${C_RESET}"
+        echo -e "${C_GREEN}备份过程已完成。${C_RESET}"
     else
-        echo -e "${C_RED}Backup process completed with errors.${C_RESET}"
+        echo -e "${C_RED}备份过程完成但出现错误。${C_RESET}"
     fi
 }
 
 restore_rules_from_backup() {
     local backup_file=$1
     if [ ! -f "$backup_file" ]; then
-        echo -e "${C_RED}Error: Backup file not found: $backup_file${C_RESET}"
+        echo -e "${C_RED}错误：未找到备份文件: $backup_file${C_RESET}"
         return
     fi
 
     if iptables-restore < "$backup_file"; then
-        echo -e "${C_GREEN}iptables rules restored successfully from $backup_file${C_RESET}"
-        log_message "INFO" "Restored rules from $backup_file"
-        save_rules_persistent "restoring backup"
+        echo -e "${C_GREEN}iptables 规则已成功从 $backup_file 恢复${C_RESET}"
+        log_message "信息" "已从 $backup_file 恢复规则"
+        save_rules_persistent "恢复备份"
     else
-        echo -e "${C_RED}Error: Failed to restore iptables rules.${C_RESET}"
-        log_message "ERROR" "Failed to restore from $backup_file"
+        echo -e "${C_RED}错误：恢复 iptables 规则失败。${C_RESET}"
+        log_message "错误" "从 $backup_file 恢复失败"
     fi
 }
 
 # --- Persistence ---
 save_rules_persistent_v4() {
     PERSISTENCE_METHOD=$(detect_persistence_method)
-    echo -e "${C_YELLOW}Attempting to save IPv4 rules permanently using '$PERSISTENCE_METHOD'...${C_RESET}"
+    echo -e "${C_YELLOW}正在尝试使用 '$PERSISTENCE_METHOD' 永久保存 IPv4 规则...${C_RESET}"
 
     case $PERSISTENCE_METHOD in
         netfilter-persistent)
             if sudo netfilter-persistent save; then
-                 echo -e "${C_GREEN}IPv4 rules saved successfully with netfilter-persistent.${C_RESET}"
+                 echo -e "${C_GREEN}IPv4 规则已通过 netfilter-persistent 成功保存。${C_RESET}"
             else
-                 echo -e "${C_RED}Failed to save IPv4 rules with netfilter-persistent.${C_RESET}"
+                 echo -e "${C_RED}使用 netfilter-persistent 保存 IPv4 规则失败。${C_RESET}"
             fi
             ;;
         service)
             if sudo service iptables save; then
-                 echo -e "${C_GREEN}IPv4 rules saved successfully with service iptables save.${C_RESET}"
+                 echo -e "${C_GREEN}IPv4 规则已通过 service iptables save 成功保存。${C_RESET}"
             else
-                 echo -e "${C_RED}Failed to save IPv4 rules with service iptables save.${C_RESET}"
+                 echo -e "${C_RED}使用 service iptables save 保存 IPv4 规则失败。${C_RESET}"
             fi
             ;;
         systemd)
-            # Provide instructions for systemd, as direct save isn't standard
-            echo -e "${C_CYAN}To make IPv4 rules persistent on this systemd system, you might need to:${C_RESET}"
-            echo -e "  1. Install 'iptables-persistent' (Debian/Ubuntu) or 'iptables-services' (CentOS/RHEL)."
-            echo -e "  2. Then run 'sudo netfilter-persistent save' or 'sudo service iptables save'."
-            echo -e "  Alternatively, you can manually save with: ${C_YELLOW}sudo iptables-save > /etc/iptables/rules.v4${C_RESET}"
+            # 为 systemd 提供说明，因为直接保存不是标准方法
+            echo -e "${C_CYAN}要在此 systemd 系统上使 IPv4 规则持久化，您可能需要：${C_RESET}"
+            echo -e "  1. 安装 'iptables-persistent' (Debian/Ubuntu) 或 'iptables-services' (CentOS/RHEL)。"
+            echo -e "  2. 然后运行 'sudo netfilter-persistent save' 或 'sudo service iptables save'。"
+            echo -e "  或者，您可以手动保存：${C_YELLOW}sudo iptables-save > /etc/iptables/rules.v4${C_RESET}"
             ;;
         *)
-            echo -e "${C_RED}Unsupported persistence method for IPv4: $PERSISTENCE_METHOD.${C_RESET}"
-            echo -e "${C_CYAN}Please save your IPv4 rules manually: sudo iptables-save > /etc/iptables/rules.v4${C_RESET}"
+            echo -e "${C_RED}不支持的 IPv4 持久化方法: $PERSISTENCE_METHOD。${C_RESET}"
+            echo -e "${C_CYAN}请手动保存您的 IPv4 规则: sudo iptables-save > /etc/iptables/rules.v4${C_RESET}"
             ;;
     esac
 }
 
 save_rules_persistent_v6() {
     if ! command -v ip6tables-save &>/dev/null; then
-        log_message "INFO" "ip6tables not found, skipping IPv6 rule saving."
+        log_message "信息" "未找到 ip6tables，跳过 IPv6 规则保存。"
         return
     fi
 
     PERSISTENCE_METHOD=$(detect_persistence_method)
-    echo -e "${C_YELLOW}Attempting to save IPv6 rules permanently using '$PERSISTENCE_METHOD'...${C_RESET}"
+    echo -e "${C_YELLOW}正在尝试使用 '$PERSISTENCE_METHOD' 永久保存 IPv6 规则...${C_RESET}"
 
     case $PERSISTENCE_METHOD in
         netfilter-persistent)
-            # netfilter-persistent saves both v4 and v6, so this might be redundant but safe
+            # netfilter-persistent 保存 v4 和 v6，所以这可能是多余但安全的
             if sudo netfilter-persistent save; then
-                 echo -e "${C_GREEN}IPv6 rules saved successfully with netfilter-persistent.${C_RESET}"
+                 echo -e "${C_GREEN}已使用 netfilter-persistent 成功保存 IPv6 规则。${C_RESET}"
             else
-                 echo -e "${C_RED}Failed to save IPv6 rules with netfilter-persistent.${C_RESET}"
+                 echo -e "${C_RED}使用 netfilter-persistent 保存 IPv6 规则失败。${C_RESET}"
             fi
             ;;
         service)
             if sudo service ip6tables save; then
-                 echo -e "${C_GREEN}IPv6 rules saved successfully with service ip6tables save.${C_RESET}"
+                 echo -e "${C_GREEN}已使用 service ip6tables save 成功保存 IPv6 规则。${C_RESET}"
             else
-                 echo -e "${C_RED}Failed to save IPv6 rules with service ip6tables save. Is 'ip6tables-services' installed?${C_RESET}"
+                 echo -e "${C_RED}使用 service ip6tables save 保存 IPv6 规则失败。是否已安装 'ip6tables-services'？${C_RESET}"
             fi
             ;;
         systemd)
-            echo -e "${C_CYAN}To make IPv6 rules persistent, you can manually save with: ${C_YELLOW}sudo ip6tables-save > /etc/iptables/rules.v6${C_RESET}"
+            echo -e "${C_CYAN}要使 IPv6 规则持久化，您可以手动保存：${C_YELLOW}sudo ip6tables-save > /etc/iptables/rules.v6${C_RESET}"
             ;;
         *)
-            echo -e "${C_RED}Unsupported persistence method for IPv6: $PERSISTENCE_METHOD.${C_RESET}"
-            echo -e "${C_CYAN}Please save your IPv6 rules manually: sudo ip6tables-save > /etc/iptables/rules.v6${C_RESET}"
+            echo -e "${C_RED}不支持的 IPv6 持久化方法: $PERSISTENCE_METHOD。${C_RESET}"
+            echo -e "${C_CYAN}请手动保存您的 IPv6 规则: sudo ip6tables-save > /etc/iptables/rules.v6${C_RESET}"
             ;;
     esac
 }
@@ -247,48 +247,48 @@ save_rules_persistent() {
     save_rules_persistent_v6 "$action_context"
 }
 
-# --- Full Reset ---
+# --- 完全重置 ---
 full_reset_iptables() {
-    echo -e "${C_RED}WARNING: This will flush ALL IPv4 and IPv6 iptables rules, delete all custom chains, and set default policies to ACCEPT. This may expose your server.${C_RESET}"
-    read -p "Are you absolutely sure you want to proceed? (yes/no): " confirm
+    echo -e "${C_RED}警告：这将清空所有 IPv4 和 IPv6 iptables 规则，删除所有自定义链，并将默认策略设置为 ACCEPT。这可能会暴露您的服务器。${C_RESET}"
+    read -p "您确定要继续吗？ (yes/no): " confirm
     if [[ "$confirm" != "yes" ]]; then
-        echo "Aborted."
+        echo "已中止。"
         return
     fi
 
-    echo "Flushing all IPv4 rules..."
+    echo "正在清空所有 IPv4 规则..."
     iptables -F
     iptables -t nat -F
     iptables -t mangle -F
-    echo "Deleting all non-default IPv4 chains..."
+    echo "正在删除所有非默认 IPv4 链..."
     iptables -X
     iptables -t nat -X
     iptables -t mangle -X
-    echo "Setting default IPv4 policies to ACCEPT..."
+    echo "正在将默认 IPv4 策略设置为 ACCEPT..."
     iptables -P INPUT ACCEPT
     iptables -P FORWARD ACCEPT
     iptables -P OUTPUT ACCEPT
 
     if command -v ip6tables &> /dev/null; then
-        echo "Flushing all IPv6 rules..."
+        echo "正在清空所有 IPv6 规则..."
         ip6tables -F
         ip6tables -t nat -F
         ip6tables -t mangle -F
-        echo "Deleting all non-default IPv6 chains..."
+        echo "正在删除所有非默认 IPv6 链..."
         ip6tables -X
         ip6tables -t nat -X
         ip6tables -t mangle -X
-        echo "Setting default IPv6 policies to ACCEPT..."
+        echo "正在将默认 IPv6 策略设置为 ACCEPT..."
         ip6tables -P INPUT ACCEPT
         ip6tables -P FORWARD ACCEPT
         ip6tables -P OUTPUT ACCEPT
     fi
 
-    log_message "WARNING" "Performed a full reset of all iptables rules (IPv4 and IPv6)."
-    echo -e "${C_GREEN}All iptables rules (IPv4 and IPv6) have been completely reset.${C_RESET}"
+    log_message "警告" "对所有 iptables 规则（IPv4 和 IPv6）执行了完全重置。"
+    echo -e "${C_GREEN}所有 iptables 规则（IPv4 和 IPv6）已被完全重置。${C_RESET}"
 
-    read -p "Do you want to save this reset state permanently? (yes/no): " save_confirm
+    read -p "您想永久保存此重置状态吗？ (yes/no): " save_confirm
     if [[ "$save_confirm" == "yes" ]]; then
-        save_rules_persistent "saving full reset"
+        save_rules_persistent "保存完全重置"
     fi
 }

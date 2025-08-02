@@ -2,7 +2,7 @@
 
 # libs/lib_utils.sh
 #
-# Utility functions for Port Mapping Manager
+# Port Mapping Manager 的实用函数库
 
 # --- Color Definitions ---
 C_RESET='\033[0m'
@@ -21,6 +21,7 @@ CONFIG_FILE="$CONFIG_DIR/port_mapping_manager.conf"
 BACKUP_DIR="$CONFIG_DIR/backups"
 
 # --- Logging ---
+# --- 日志记录 ---
 log_message() {
     local type=$1
     local message=$2
@@ -33,8 +34,8 @@ log_message() {
 # --- Input Sanitization ---
 sanitize_input() {
     local input=$1
-    # Strict sanitization: Allow only alphanumeric, underscore, hyphen, dot.
-    # Disallow path characters like '/' to prevent path traversal unless specifically handled.
+        # 严格的输入清理：只允许字母、数字、下划线、连字符和点。
+    # 禁止像'/'这样的路径字符，以防止路径遍历，除非有特定处理。
     echo "$input" | sed 's/[^a-zA-Z0-9_.-]//g'
 }
 
@@ -47,27 +48,27 @@ validate_ip_address() {
             IFS='.' read -r -a octets <<< "$ip"
             for octet in "${octets[@]}"; do
                 if (( octet > 255 )); then
-                    echo "invalid"
+                    echo "无效"
                     return
                 fi
             done
-            echo "valid"
+            echo "有效"
         else
-            echo "invalid"
+            echo "无效"
         fi
     elif [[ "$ip_type" == "6" ]]; then
-        # A simple regex for IPv6, not exhaustive but good enough for many cases.
-        # For a truly robust validation, a more complex function or external tool is needed.
+        # 一个简单的IPv6正则表达式，虽然不完全详尽，但在许多情况下已经足够了。
+        # 要进行真正可靠的验证，需要更复杂的函数或外部工具。
         if [[ $ip =~ ^([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}$ || # 1:2:3:4:5:6:7:8
               $ip =~ ^([0-9a-fA-F]{1,4}:){1,7}:$ ||                  # 1::
               $ip =~ ^:(:[0-9a-fA-F]{1,4}){1,7}$ ||                 # ::2
               $ip =~ ^([0-9a-fA-F]{1,4}:){1,}(:[0-9a-fA-F]{1,4}){1,}$ ]]; then # 1::8 or 1:2::8 etc.
-            echo "valid"
+            echo "有效"
         else
-            echo "invalid"
+            echo "无效"
         fi
     else
-        echo "invalid_type"
+        echo "无效类型"
     fi
 }
 
@@ -82,7 +83,7 @@ detect_package_manager() {
     elif command -v pacman >/dev/null 2>&1; then
         echo "pacman"
     else
-        echo "unknown"
+        echo "未知"
     fi
 }
 
@@ -96,14 +97,14 @@ detect_persistence_method() {
     elif command -v systemctl >/dev/null 2>&1; then
         echo "systemd"
     else
-        echo "manual"
+        echo "手动"
     fi
 }
 
 # --- Prerequisite Checks ---
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
-        echo -e "${C_RED}Error: This script must be run as root. Please use sudo.${C_RESET}"
+        echo -e "${C_RED}错误：此脚本必须以 root 身份运行。请使用 sudo。${C_RESET}"
         exit 1
     fi
 }
@@ -117,27 +118,27 @@ check_dependencies() {
     done
 
     if [ ${#missing_deps[@]} -gt 0 ]; then
-        echo -e "${C_RED}Error: Missing critical dependencies: ${missing_deps[*]}.${C_RESET}"
-        # Attempt to install
+        echo -e "${C_RED}错误：缺少关键依赖项：${missing_deps[*]}.${C_RESET}"
+        # 尝试安装
         local pm
         pm=$(detect_package_manager)
-        if [ "$pm" != "unknown" ]; then
-            echo -e "${C_YELLOW}Attempting to install missing packages using $pm...${C_RESET}"
+        if [ "$pm" != "未知" ]; then
+            echo -e "${C_YELLOW}正在尝试使用 $pm 安装缺少的软件包...${C_RESET}"
             case $pm in
                 apt) sudo apt-get update && sudo apt-get install -y iptables coreutils;;
                 dnf) sudo dnf install -y iptables-services coreutils;;
                 yum) sudo yum install -y iptables-services coreutils;;
                 pacman) sudo pacman -Syu --noconfirm iptables coreutils;;
             esac
-            # Re-check after install attempt
+            # 安装后重新检查
             for dep in "${missing_deps[@]}"; do
                 if ! command -v "$dep" >/dev/null 2>&1; then
-                     echo -e "${C_RED}Failed to install '$dep'. Please install it manually and rerun the script.${C_RESET}"
+                     echo -e "${C_RED}安装 '$dep' 失败。请手动安装并重新运行脚本。${C_RESET}"
                      exit 1
                 fi
             done
         else
-            echo -e "${C_RED}Could not determine package manager. Please install the missing dependencies manually.${C_RESET}"
+            echo -e "${C_RED}无法确定软件包管理器。请手动安装缺少的依赖项。${C_RESET}"
             exit 1
         fi
     fi
@@ -149,29 +150,29 @@ validate_port() {
     local protocol=$2 # Optional: tcp or udp
 
     if ! [[ $port =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-        echo "invalid"
+        echo "无效"
         return
     fi
 
-    # Check for system reserved ports, but allow user to proceed with caution.
+    # 检查系统保留端口，但允许用户谨慎操作。
     if [ "$port" -lt 1024 ]; then
-        echo "reserved"
-        # We return 'reserved' but don't exit, the calling function should handle this.
+        echo "保留"
+        # 我们返回 '保留' 但不退出，调用函数应处理此问题。
     fi
 
-    # A more reliable check for listening ports using ss.
-    # The regex `\s:$port(\s|$)` ensures we match the exact port number.
+    # 使用ss更可靠地检查监听端口。
+    # 正则表达式 `\s:$port(\s|$)` 确保我们匹配确切的端口号。
     local listen_check_cmd="ss -tln"
     if [[ "$protocol" == "udp" ]]; then
         listen_check_cmd="ss -uln"
     fi
 
     if $listen_check_cmd | awk '{print $5}' | grep -q -w ":$port"; then
-        echo "listening"
+        echo "监听中"
         return
     fi
 
-    echo "valid"
+    echo "有效"
 }
 
 # --- Byte Formatter ---
