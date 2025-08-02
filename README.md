@@ -23,7 +23,7 @@
 
 ```bash
 # 一键下载并运行（示例）
-bash <(curl -sL https://raw.githubusercontent.com/yourrepo/port-mapping-manager/main/port_mapping_manager.sh)
+bash <(curl -fsSL raw.githubusercontent.com/pjy02/Port-Mapping-Manage/refs/heads/main/install_pmm.sh)
 ```
 
 ### 可选启动参数
