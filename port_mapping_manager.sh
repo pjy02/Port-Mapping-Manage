@@ -1818,6 +1818,8 @@ partial_uninstall() {
     
     echo
     echo "开始执行不完全卸载..."
+    local success_count=0
+    local fail_count=0
     echo
     
     # 执行选定的卸载操作
@@ -1825,6 +1827,8 @@ partial_uninstall() {
         case "$choice" in
             "rules")
                 echo "1. 删除 iptables 规则..."
+                local rules_success=true
+                
                 read -p "  删除 IPv4 规则? (Y/n): " delete_v4
                 if [[ ! "$delete_v4" =~ ^[nN]$ ]]; then
                     echo "    正在删除 IPv4 规则..."
@@ -1832,6 +1836,7 @@ partial_uninstall() {
                         echo "    ✓ IPv4 规则删除完成"
                     else
                         echo "    ✗ IPv4 规则删除失败"
+                        rules_success=false
                     fi
                 else
                     echo "    跳过 IPv4 规则删除"
@@ -1844,6 +1849,7 @@ partial_uninstall() {
                         echo "    ✓ IPv6 规则删除完成"
                     else
                         echo "    ✗ IPv6 规则删除失败"
+                        rules_success=false
                     fi
                 else
                     echo "    跳过 IPv6 规则删除"
@@ -1856,9 +1862,16 @@ partial_uninstall() {
                         echo "    ✓ 状态保存完成"
                     else
                         echo "    ✗ 状态保存失败"
+                        rules_success=false
                     fi
                 else
                     echo "    跳过状态保存"
+                fi
+                
+                if [ "$rules_success" = true ]; then
+                    ((success_count++))
+                else
+                    ((fail_count++))
                 fi
                 ;;
             "systemd")
@@ -1866,8 +1879,10 @@ partial_uninstall() {
                 if [[ "$OSTYPE" == "linux-gnu" ]] && command -v systemctl &>/dev/null; then
                     if cleanup_systemd_services; then
                         echo "  ✓ systemd 服务清理完成"
+                        ((success_count++))
                     else
                         echo "  ✗ systemd 服务清理失败"
+                        ((fail_count++))
                     fi
                 else
                     echo "  - 当前系统不支持 systemd 或 systemctl 不可用，跳过"
@@ -1879,8 +1894,10 @@ partial_uninstall() {
                     echo "  - 正在删除备份目录: $BACKUP_DIR"
                     if rm -rf "$BACKUP_DIR" 2>/dev/null; then
                         echo "  - ✓ 已删除备份目录"
+                        ((success_count++))
                     else
                         echo "  - ✗ 删除备份目录失败 (可能需要权限)"
+                        ((fail_count++))
                     fi
                 else
                     echo "  - 备份目录不存在: $BACKUP_DIR"
@@ -1888,12 +1905,15 @@ partial_uninstall() {
                 ;;
             "config")
                 echo "4. 删除配置和日志..."
+                local config_success=true
+                
                 if [ -f "$LOG_FILE" ]; then
                     echo "  - 正在删除日志文件: $LOG_FILE"
                     if rm -f "$LOG_FILE" 2>/dev/null; then
                         echo "  - ✓ 已删除日志文件"
                     else
                         echo "  - ✗ 删除日志文件失败 (可能需要权限)"
+                        config_success=false
                     fi
                 else
                     echo "  - 日志文件不存在: $LOG_FILE"
@@ -1905,9 +1925,16 @@ partial_uninstall() {
                         echo "  - ✓ 已删除配置目录"
                     else
                         echo "  - ✗ 删除配置目录失败 (可能需要权限)"
+                        config_success=false
                     fi
                 else
                     echo "  - 配置目录不存在: $CONFIG_DIR"
+                fi
+                
+                if [ "$config_success" = true ]; then
+                    ((success_count++))
+                else
+                    ((fail_count++))
                 fi
                 ;;
             "scripts")
@@ -1916,7 +1943,7 @@ partial_uninstall() {
                            "/etc/port_mapping_manager/port_mapping_manager.sh" "/etc/port_mapping_manager/pmm" 
                            "$(dirname "$0")/pmm")
                 local deleted_count=0
-                local failed_count=0
+                local script_failed=false
                 
                 for p in "${paths[@]}"; do 
                     if [ -f "$p" ]; then
@@ -1926,21 +1953,36 @@ partial_uninstall() {
                             ((deleted_count++))
                         else
                             echo "  - ✗ 删除失败: $p (可能需要权限)"
-                            ((failed_count++))
+                            script_failed=true
                         fi
                     else
                         echo "  - 文件不存在: $p"
                     fi
                 done
                 
-                echo "    脚本删除统计: 成功 $deleted_count 个, 失败 $failed_count 个"
+                if [ "$script_failed" = false ] && [ "$deleted_count" -gt 0 ]; then
+                    echo "  - ✓ 脚本文件删除成功 (共 $deleted_count 个)"
+                    ((success_count++))
+                else
+                    echo "  - ✗ 脚本文件删除失败或无文件可删除"
+                    ((fail_count++))
+                fi
                 ;;
         esac
         echo
     done
     
-    echo -e "${GREEN}不完全卸载完成${NC}"
-    echo "已删除选定内容，其他内容保持不变。"
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}      不完全卸载完成${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    echo
+    echo "操作统计: 成功 $success_count 项, 失败 $fail_count 项"
+    
+    if [ "$fail_count" -eq 0 ]; then
+        echo "已成功删除选定内容，其他内容保持不变。"
+    else
+        echo "部分操作失败，请检查权限或手动重试失败的项目。"
+    fi
 }
 
 # 主卸载菜单
