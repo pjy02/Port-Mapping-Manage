@@ -1460,10 +1460,10 @@ check_for_updates() {
         return 1
     fi
     
-    # 调试：显示API响应内容的前几行
-    echo -e "${YELLOW}调试信息：API响应内容${NC}"
-    head -10 "$temp_file" 2>/dev/null | sed 's/^/  /'
-    echo
+    # 调试：显示API响应内容的前几行（已禁用）
+    # echo -e "${YELLOW}调试信息：API响应内容${NC}"
+    # head -10 "$temp_file" 2>/dev/null | sed 's/^/  /'
+    # echo
     
     # 解析版本信息 - 从仓库信息获取
     local remote_version=""
@@ -1473,16 +1473,16 @@ check_for_updates() {
     # 获取默认分支
     if grep -q '"default_branch"' "$temp_file"; then
         default_branch=$(grep -o '"default_branch": "[^"]*"' "$temp_file" | cut -d'"' -f4)
-        echo -e "${YELLOW}调试：默认分支: $default_branch${NC}"
+        # echo -e "${YELLOW}调试：默认分支: $default_branch${NC}"
     fi
     
     # 如果获取到了默认分支，尝试从该分支的脚本文件获取版本
     if [ -n "$default_branch" ]; then
         local branch_script_url="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/$default_branch/port_mapping_manager.sh"
-        echo -e "${YELLOW}调试：尝试从分支脚本获取版本${NC}"
+        # echo -e "${YELLOW}调试：尝试从分支脚本获取版本${NC}"
         if curl -s "$branch_script_url" | grep -q "SCRIPT_VERSION="; then
             remote_version=$(curl -s "$branch_script_url" | grep "SCRIPT_VERSION=" | cut -d'"' -f2 | head -1)
-            echo -e "${YELLOW}调试：从分支脚本获取版本: $remote_version${NC}"
+            # echo -e "${YELLOW}调试：从分支脚本获取版本: $remote_version${NC}"
         fi
     fi
     
@@ -1491,10 +1491,10 @@ check_for_updates() {
     
     # 如果从分支脚本获取失败，尝试从main分支直接获取
     if [ -z "$remote_version" ]; then
-        echo -e "${YELLOW}调试：尝试从main分支直接获取版本信息${NC}"
+        # echo -e "${YELLOW}调试：尝试从main分支直接获取版本信息${NC}"
         if curl -s "$SCRIPT_URL" | grep -q "SCRIPT_VERSION="; then
             remote_version=$(curl -s "$SCRIPT_URL" | grep "SCRIPT_VERSION=" | cut -d'"' -f2 | head -1)
-            echo -e "${YELLOW}调试：从main分支获取版本: $remote_version${NC}"
+            # echo -e "${YELLOW}调试：从main分支获取版本: $remote_version${NC}"
         fi
     fi
     
