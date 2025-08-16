@@ -1649,7 +1649,7 @@ complete_uninstall() {
     fi
     
     # 7. 删除当前脚本
-    local current_script="$0"
+    local current_script="$(realpath "$0" 2>/dev/null || echo "$0")"
     echo "  - 准备删除当前脚本: $current_script"
     
     echo
@@ -1671,24 +1671,17 @@ complete_uninstall() {
     read -p "是否删除当前脚本文件？(y/N): " delete_self
     if [[ "$delete_self" =~ ^[Yy]$ ]]; then
         echo "正在删除当前脚本文件..."
-        if rm -- "$0" 2>/dev/null; then
+        if rm -f "$current_script" 2>/dev/null; then
             echo "  - ✓ 当前脚本文件已删除"
+            echo "脚本已成功删除"
         else
             echo "  - ✗ 删除当前脚本文件失败 (可能需要权限)"
+            echo "请手动删除: $current_script"
         fi
+    else
+        echo "脚本文件保留，请手动删除: $current_script"
     fi
     echo
-    
-    # 询问是否立即删除当前脚本
-    read -p "是否立即删除当前脚本文件? (y/N): " delete_self
-    if [[ "$delete_self" =~ ^[yY]$ ]]; then
-        echo "正在删除当前脚本..."
-        rm "$current_script" 2>/dev/null && echo "脚本已删除" || echo "脚本删除失败，请手动删除"
-        exit 0
-    else
-        echo "脚本文件保留，请手动删除"
-        exit 0
-    fi
 }
 
 # 不完全卸载功能
