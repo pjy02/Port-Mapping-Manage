@@ -1370,49 +1370,325 @@ delete_rules_by_version() {
     return $deleted_count
 }
 
-uninstall_script() {
-    echo -e "${RED}⚠ 即将卸载脚本并删除脚本创建的全部映射规则${NC}"
-    read -p "确认继续卸载? (yes/NO): " confirm
-    if [[ "$confirm" != "yes" ]]; then
-        echo "已取消卸载"; return
-    fi
-
-    # 1. 删除当前IP版本的规则
-    echo "正在删除脚本创建的 iptables 规则..."
-    delete_rules_by_version "$IP_VERSION"
+# 清理systemd服务
+cleanup_systemd_services() {
+    echo "正在清理 systemd 服务..."
     
-    # 2. 询问是否删除另一个IP版本的规则
-    local other_version
-    if [ "$IP_VERSION" = "4" ]; then
-        other_version="6"
-    else
-        other_version="4"
+    local services=("udp-port-mapping.service" "iptables-restore.service")
+    local service_files=("/etc/systemd/system/udp-port-mapping.service" "/etc/systemd/system/iptables-restore.service")
+    
+    # 停止并禁用服务
+    for service in "${services[@]}"; do
+        if systemctl is-enabled "$service" &>/dev/null; then
+            systemctl disable "$service" 2>/dev/null && echo "  - 已禁用 $service"
+        fi
+        if systemctl is-active "$service" &>/dev/null; then
+            systemctl stop "$service" 2>/dev/null && echo "  - 已停止 $service"
+        fi
+    done
+    
+    # 删除服务文件
+    for service_file in "${service_files[@]}"; do
+        if [ -f "$service_file" ]; then
+            rm -f "$service_file" && echo "  - 已删除 $service_file"
+        fi
+    done
+    
+    # 重新加载systemd
+    systemctl daemon-reload 2>/dev/null
+    echo "systemd 服务清理完成"
+}
+
+# 清理netfilter-persistent状态
+cleanup_netfilter_persistent() {
+    echo "正在清理 netfilter-persistent 状态..."
+    
+    if command -v netfilter-persistent &>/dev/null; then
+        # 备份当前规则（可选）
+        if [ -d "/etc/iptables" ]; then
+            echo "  - 检测到 /etc/iptables 目录，可能包含 netfilter-persistent 配置"
+            echo "  - 注意：netfilter-persistent 的规则文件需要手动清理"
+        fi
+    fi
+}
+
+# 完全卸载功能
+complete_uninstall() {
+    echo -e "${RED}========================================${NC}"
+    echo -e "${RED}      完全卸载模式${NC}"
+    echo -e "${RED}========================================${NC}"
+    echo
+    echo "此模式将："
+    echo "  ✓ 删除所有 IPv4 和 IPv6 映射规则"
+    echo "  ✓ 清理所有 systemd 服务"
+    echo "  ✓ 删除配置文件、日志和备份"
+    echo "  ✓ 删除脚本文件和快捷方式"
+    echo "  ✓ 尝试恢复系统到初始状态"
+    echo
+    echo -e "${RED}⚠ 此操作不可逆！所有数据将永久丢失！${NC}"
+    echo
+    
+    read -p "确认执行完全卸载? (输入 FULL_UNINSTALL 来确认): " confirm
+    if [[ "$confirm" != "FULL_UNINSTALL" ]]; then
+        echo -e "${YELLOW}已取消完全卸载${NC}"
+        return 1
     fi
     
-    read -p "是否同时删除 IPv${other_version} 的规则? (y/N): " delete_other
-    if [[ "$delete_other" =~ ^[yY]$ ]]; then
-        delete_rules_by_version "$other_version"
-    fi
-
-    # 3. 自动保存当前状态（删除规则后的状态）
+    echo
+    echo "开始执行完全卸载..."
+    echo
+    
+    # 1. 删除所有IP版本的规则
+    echo "1. 删除所有 iptables 规则..."
+    delete_rules_by_version "4"
+    delete_rules_by_version "6"
+    
+    # 2. 清理systemd服务
+    echo "2. 清理系统服务..."
+    cleanup_systemd_services
+    
+    # 3. 清理netfilter-persistent
+    echo "3. 清理持久化配置..."
+    cleanup_netfilter_persistent
+    
+    # 4. 保存清理后的状态
+    echo "4. 保存系统状态..."
     save_rules
-
-    # 4. 询问是否保留备份文件
-    read -p "是否保留备份目录 $BACKUP_DIR ? (y/n): " keep_backup
-    if [[ "$keep_backup" =~ ^[nN]$ ]]; then
-        rm -rf "$BACKUP_DIR" && echo "已删除备份目录"
-    fi
-
-    # 5. 删除配置、日志目录
-    rm -f "$LOG_FILE"
-    rm -rf "$CONFIG_DIR"
-
-    # 6. 删除脚本与快捷启动器 (若位于 /usr/local/bin 或当前目录)
+    
+    # 5. 删除所有文件
+    echo "5. 删除所有文件..."
+    rm -rf "$BACKUP_DIR" && echo "  - 已删除备份目录: $BACKUP_DIR"
+    rm -f "$LOG_FILE" && echo "  - 已删除日志文件: $LOG_FILE"
+    rm -rf "$CONFIG_DIR" && echo "  - 已删除配置目录: $CONFIG_DIR"
+    
+    # 6. 删除脚本文件
+    echo "6. 删除脚本文件..."
     local paths=("/usr/local/bin/port_mapping_manager.sh" "/usr/local/bin/pmm" "/etc/port_mapping_manager/port_mapping_manager.sh" "/etc/port_mapping_manager/pmm" "$(dirname "$0")/pmm")
-    for p in "${paths[@]}"; do [ -f "$p" ] && rm -f "$p" && echo "已删除 $p"; done
+    for p in "${paths[@]}"; do 
+        if [ -f "$p" ]; then
+            rm -f "$p" && echo "  - 已删除: $p"
+        fi
+    done
+    
+    # 7. 删除当前脚本
+    local current_script="$0"
+    echo "  - 准备删除当前脚本: $current_script"
+    
+    echo
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}      完全卸载完成${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    echo
+    echo "系统已尽可能恢复到安装前的状态。"
+    echo "注意：某些系统级配置可能需要手动清理。"
+    echo
+    
+    # 询问是否立即删除当前脚本
+    read -p "是否立即删除当前脚本文件? (y/N): " delete_self
+    if [[ "$delete_self" =~ ^[yY]$ ]]; then
+        echo "正在删除当前脚本..."
+        rm "$current_script" 2>/dev/null && echo "脚本已删除" || echo "脚本删除失败，请手动删除"
+        exit 0
+    else
+        echo "脚本文件保留，请手动删除"
+        exit 0
+    fi
+}
 
-    echo -e "${GREEN}卸载完成${NC}"
-    exit 0
+# 不完全卸载功能
+partial_uninstall() {
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}      不完全卸载模式${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo
+    echo "此模式允许您选择要删除的内容："
+    echo
+    
+    local choices=()
+    local descriptions=()
+    
+    # 检查可用的卸载选项
+    if [ -n "$(iptables -t nat -L PREROUTING 2>/dev/null | grep "$RULE_COMMENT")" ] || 
+       [ -n "$(ip6tables -t nat -L PREROUTING 2>/dev/null | grep "$RULE_COMMENT")" ]; then
+        choices+=("rules")
+        descriptions+=("删除 iptables 映射规则")
+    fi
+    
+    if [ -f "/etc/systemd/system/udp-port-mapping.service" ] || 
+       [ -f "/etc/systemd/system/iptables-restore.service" ]; then
+        choices+=("systemd")
+        descriptions+=("删除 systemd 服务")
+    fi
+    
+    if [ -d "$BACKUP_DIR" ] && [ "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]; then
+        choices+=("backup")
+        descriptions+=("删除备份文件")
+    fi
+    
+    if [ -f "$LOG_FILE" ] || [ -d "$CONFIG_DIR" ]; then
+        choices+=("config")
+        descriptions+=("删除配置和日志")
+    fi
+    
+    if [ -f "/usr/local/bin/pmm" ] || [ -f "/usr/local/bin/port_mapping_manager.sh" ] || 
+       [ -f "/etc/port_mapping_manager/pmm" ] || [ -f "/etc/port_mapping_manager/port_mapping_manager.sh" ]; then
+        choices+=("scripts")
+        descriptions+=("删除脚本和快捷方式")
+    fi
+    
+    if [ ${#choices[@]} -eq 0 ]; then
+        echo -e "${YELLOW}没有找到可卸载的内容${NC}"
+        return 0
+    fi
+    
+    # 显示选项
+    for i in "${!choices[@]}"; do
+        echo "$((i+1)). ${descriptions[i]}"
+    done
+    echo
+    echo "0. 取消卸载"
+    echo
+    
+    # 收集用户选择
+    local selected=()
+    while true; do
+        read -p "请输入要删除的选项编号 (多个用空格分隔): " input
+        
+        if [[ "$input" == "0" ]]; then
+            echo -e "${YELLOW}已取消卸载${NC}"
+            return 0
+        fi
+        
+        local valid=true
+        for num in $input; do
+            if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le "${#choices[@]}" ]; then
+                local choice="${choices[$((num-1))]}}"
+                if [[ ! " ${selected[@]} " =~ " ${choice} " ]]; then
+                    selected+=("$choice")
+                    echo "  ✓ 已选择: ${descriptions[$((num-1))]}}"
+                fi
+            else
+                valid=false
+                break
+            fi
+        done
+        
+        if [ "$valid" = true ] && [ ${#selected[@]} -gt 0 ]; then
+            break
+        else
+            echo -e "${RED}输入无效，请重新选择${NC}"
+            selected=()
+        fi
+    done
+    
+    echo
+    echo "选定的卸载内容："
+    for choice in "${selected[@]}"; do
+        for i in "${!choices[@]}"; do
+            if [ "${choices[i]}" = "$choice" ]; then
+                echo "  - ${descriptions[i]}"
+                break
+            fi
+        done
+    done
+    echo
+    
+    read -p "确认执行选定的卸载操作? (y/N): " confirm
+    if [[ ! "$confirm" =~ ^[yY]$ ]]; then
+        echo -e "${YELLOW}已取消卸载${NC}"
+        return 1
+    fi
+    
+    echo
+    echo "开始执行不完全卸载..."
+    echo
+    
+    # 执行选定的卸载操作
+    for choice in "${selected[@]}"; do
+        case "$choice" in
+            "rules")
+                echo "1. 删除 iptables 规则..."
+                read -p "  删除 IPv4 规则? (Y/n): " delete_v4
+                [[ ! "$delete_v4" =~ ^[nN]$ ]] && delete_rules_by_version "4"
+                
+                read -p "  删除 IPv6 规则? (Y/n): " delete_v6
+                [[ ! "$delete_v6" =~ ^[nN]$ ]] && delete_rules_by_version "6"
+                
+                read -p "  保存当前状态? (Y/n): " save_state
+                [[ ! "$save_state" =~ ^[nN]$ ]] && save_rules
+                ;;
+            "systemd")
+                echo "2. 清理 systemd 服务..."
+                cleanup_systemd_services
+                ;;
+            "backup")
+                echo "3. 删除备份文件..."
+                rm -rf "$BACKUP_DIR" && echo "  - 已删除备份目录: $BACKUP_DIR"
+                ;;
+            "config")
+                echo "4. 删除配置和日志..."
+                rm -f "$LOG_FILE" && echo "  - 已删除日志文件: $LOG_FILE"
+                rm -rf "$CONFIG_DIR" && echo "  - 已删除配置目录: $CONFIG_DIR"
+                ;;
+            "scripts")
+                echo "5. 删除脚本和快捷方式..."
+                local paths=("/usr/local/bin/port_mapping_manager.sh" "/usr/local/bin/pmm" "/etc/port_mapping_manager/port_mapping_manager.sh" "/etc/port_mapping_manager/pmm" "$(dirname "$0")/pmm")
+                for p in "${paths[@]}"; do 
+                    if [ -f "$p" ]; then
+                        rm -f "$p" && echo "  - 已删除: $p"
+                    fi
+                done
+                ;;
+        esac
+        echo
+    done
+    
+    echo -e "${GREEN}不完全卸载完成${NC}"
+    echo "已删除选定内容，其他内容保持不变。"
+}
+
+# 主卸载菜单
+uninstall_script() {
+    echo -e "${RED}========================================${NC}"
+    echo -e "${RED}      卸载端口映射脚本${NC}"
+    echo -e "${RED}========================================${NC}"
+    echo
+    echo "请选择卸载模式："
+    echo
+    echo "1. 完全卸载"
+    echo "   └─ 删除所有规则、配置、服务和脚本文件"
+    echo "   └─ 恢复系统到初始状态"
+    echo "   └─ ⚠ 不可逆操作，请谨慎选择"
+    echo
+    echo "2. 不完全卸载"
+    echo "   └─ 交互式选择要删除的内容"
+    echo "   └─ 可选择性删除规则、服务、配置等"
+    echo "   └─ 更灵活的控制"
+    echo
+    echo "0. 取消卸载"
+    echo
+    
+    while true; do
+        read -p "请输入选择 (0-2): " choice
+        
+        case "$choice" in
+            1)
+                complete_uninstall
+                break
+                ;;
+            2)
+                partial_uninstall
+                break
+                ;;
+            0)
+                echo -e "${YELLOW}已取消卸载${NC}"
+                break
+                ;;
+            *)
+                echo -e "${RED}无效选择，请重新输入${NC}"
+                ;;
+        esac
+    done
 }
 
 # --- 主程序和菜单 ---
