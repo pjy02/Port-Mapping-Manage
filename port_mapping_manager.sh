@@ -2036,24 +2036,15 @@ uninstall_script() {
     echo "   └─ 恢复系统到初始状态"
     echo "   └─ ⚠ 不可逆操作，请谨慎选择"
     echo
-    echo "2. 不完全卸载"
-    echo "   └─ 交互式选择要删除的内容"
-    echo "   └─ 可选择性删除规则、服务、配置等"
-    echo "   └─ 更灵活的控制"
-    echo
     echo "0. 取消卸载"
     echo
     
     while true; do
-        read -p "请输入选择 (0-2): " choice
+        read -p "请输入选择 (0-1): " choice
         
         case "$choice" in
             1)
                 complete_uninstall
-                break
-                ;;
-            2)
-                partial_uninstall
                 break
                 ;;
             0)
