@@ -5,7 +5,7 @@
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断等功能
 
 # 脚本配置
-SCRIPT_VERSION="3.5"
+SCRIPT_VERSION="3.6"
 RULE_COMMENT="udp-port-mapping-script-v3"
 CONFIG_DIR="/etc/port_mapping_manager"
 LOG_FILE="/var/log/udp-port-mapping.log"
@@ -1343,6 +1343,11 @@ full_reset_iptables() {
 delete_rules_by_version() {
     local ip_version=$1
     local iptables_cmd
+    local rule_comment="UDP_PORT_MAPPING"
+    
+    if [ -n "$RULE_COMMENT" ]; then
+        rule_comment="$RULE_COMMENT"
+    fi
     
     if [ "$ip_version" = "6" ]; then
         iptables_cmd="ip6tables"
@@ -1351,7 +1356,22 @@ delete_rules_by_version() {
     fi
     
     echo "正在删除 IPv${ip_version} 规则..."
-    local rule_lines=( $($iptables_cmd -t nat -L PREROUTING --line-numbers | grep "$RULE_COMMENT" | awk '{print $1}' | sort -nr) )
+    echo "  - 调试: 使用规则注释: $rule_comment"
+    
+    # 检查命令是否存在
+    if ! command -v "$iptables_cmd" &>/dev/null; then
+        echo "  - 错误: $iptables_cmd 命令不存在"
+        return 1
+    fi
+    
+    # 获取规则列表
+    local rule_lines=()
+    if rule_lines=($($iptables_cmd -t nat -L PREROUTING --line-numbers 2>/dev/null | grep "$rule_comment" | awk '{print $1}' | sort -nr)); then
+        echo "  - 调试: 找到 ${#rule_lines[@]} 条规则"
+    else
+        echo "  - 调试: 获取规则列表失败"
+        rule_lines=()
+    fi
     
     if [ ${#rule_lines[@]} -eq 0 ]; then
         echo "  - 未找到 IPv${ip_version} 规则"
@@ -1360,13 +1380,16 @@ delete_rules_by_version() {
     
     local deleted_count=0
     for line_num in "${rule_lines[@]}"; do
+        echo "  - 尝试删除 IPv${ip_version} 规则 #$line_num"
         if $iptables_cmd -t nat -D PREROUTING "$line_num" 2>/dev/null; then
-            echo "  - 删除 IPv${ip_version} 规则 #$line_num"
+            echo "  - ✓ 成功删除 IPv${ip_version} 规则 #$line_num"
             ((deleted_count++))
+        else
+            echo "  - ✗ 删除 IPv${ip_version} 规则 #$line_num 失败"
         fi
     done
     
-    echo "  - 已删除 $deleted_count 条 IPv${ip_version} 规则"
+    echo "  - 总计删除了 $deleted_count 条 IPv${ip_version} 规则"
     return $deleted_count
 }
 
@@ -1374,28 +1397,61 @@ delete_rules_by_version() {
 cleanup_systemd_services() {
     echo "正在清理 systemd 服务..."
     
+    # 检查是否在Linux系统且systemctl可用
+    if [[ "$OSTYPE" != "linux-gnu" ]] || ! command -v systemctl &>/dev/null; then
+        echo "  - 当前系统不支持 systemd 或 systemctl 命令不可用"
+        echo "  - 跳过 systemd 服务清理"
+        return 0
+    fi
+    
     local services=("udp-port-mapping.service" "iptables-restore.service")
     local service_files=("/etc/systemd/system/udp-port-mapping.service" "/etc/systemd/system/iptables-restore.service")
     
     # 停止并禁用服务
     for service in "${services[@]}"; do
+        echo "  - 检查服务: $service"
         if systemctl is-enabled "$service" &>/dev/null; then
-            systemctl disable "$service" 2>/dev/null && echo "  - 已禁用 $service"
+            if systemctl disable "$service" 2>/dev/null; then
+                echo "  - ✓ 已禁用 $service"
+            else
+                echo "  - ✗ 禁用 $service 失败"
+            fi
+        else
+            echo "  - 服务 $service 未启用"
         fi
+        
         if systemctl is-active "$service" &>/dev/null; then
-            systemctl stop "$service" 2>/dev/null && echo "  - 已停止 $service"
+            if systemctl stop "$service" 2>/dev/null; then
+                echo "  - ✓ 已停止 $service"
+            else
+                echo "  - ✗ 停止 $service 失败"
+            fi
+        else
+            echo "  - 服务 $service 未运行"
         fi
     done
     
     # 删除服务文件
     for service_file in "${service_files[@]}"; do
+        echo "  - 检查服务文件: $service_file"
         if [ -f "$service_file" ]; then
-            rm -f "$service_file" && echo "  - 已删除 $service_file"
+            if rm -f "$service_file" 2>/dev/null; then
+                echo "  - ✓ 已删除 $service_file"
+            else
+                echo "  - ✗ 删除 $service_file 失败 (可能需要权限)"
+            fi
+        else
+            echo "  - 服务文件不存在: $service_file"
         fi
     done
     
     # 重新加载systemd
-    systemctl daemon-reload 2>/dev/null
+    if systemctl daemon-reload 2>/dev/null; then
+        echo "  - ✓ systemd 重新加载完成"
+    else
+        echo "  - ✗ systemd 重新加载失败"
+    fi
+    
     echo "systemd 服务清理完成"
 }
 
@@ -1436,39 +1492,132 @@ complete_uninstall() {
     
     echo
     echo "开始执行完全卸载..."
+    local success_count=0
+    local fail_count=0
     echo
     
     # 1. 删除所有IP版本的规则
     echo "1. 删除所有 iptables 规则..."
-    delete_rules_by_version "4"
-    delete_rules_by_version "6"
+    if delete_rules_by_version "4"; then
+        echo "  - ✓ IPv4 规则删除成功"
+        ((success_count++))
+    else
+        echo "  - ✗ IPv4 规则删除失败"
+        ((fail_count++))
+    fi
+    
+    if delete_rules_by_version "6"; then
+        echo "  - ✓ IPv6 规则删除成功"
+        ((success_count++))
+    else
+        echo "  - ✗ IPv6 规则删除失败"
+        ((fail_count++))
+    fi
     
     # 2. 清理systemd服务
     echo "2. 清理系统服务..."
-    cleanup_systemd_services
+    if cleanup_systemd_services; then
+        echo "  - ✓ systemd 服务清理成功"
+        ((success_count++))
+    else
+        echo "  - ✗ systemd 服务清理失败"
+        ((fail_count++))
+    fi
     
     # 3. 清理netfilter-persistent
     echo "3. 清理持久化配置..."
-    cleanup_netfilter_persistent
+    if cleanup_netfilter_persistent; then
+        echo "  - ✓ netfilter-persistent 清理成功"
+        ((success_count++))
+    else
+        echo "  - ✗ netfilter-persistent 清理失败"
+        ((fail_count++))
+    fi
     
     # 4. 保存清理后的状态
     echo "4. 保存系统状态..."
-    save_rules
+    if save_rules; then
+        echo "  - ✓ 系统状态保存成功"
+        ((success_count++))
+    else
+        echo "  - ✗ 系统状态保存失败"
+        ((fail_count++))
+    fi
     
     # 5. 删除所有文件
     echo "5. 删除所有文件..."
-    rm -rf "$BACKUP_DIR" && echo "  - 已删除备份目录: $BACKUP_DIR"
-    rm -f "$LOG_FILE" && echo "  - 已删除日志文件: $LOG_FILE"
-    rm -rf "$CONFIG_DIR" && echo "  - 已删除配置目录: $CONFIG_DIR"
+    local files_success=true
+    
+    if [ -d "$BACKUP_DIR" ]; then
+        echo "  - 正在删除备份目录: $BACKUP_DIR"
+        if rm -rf "$BACKUP_DIR" 2>/dev/null; then
+            echo "  - ✓ 已删除备份目录"
+        else
+            echo "  - ✗ 删除备份目录失败 (可能需要权限)"
+            files_success=false
+        fi
+    else
+        echo "  - 备份目录不存在: $BACKUP_DIR"
+    fi
+    
+    if [ -f "$LOG_FILE" ]; then
+        echo "  - 正在删除日志文件: $LOG_FILE"
+        if rm -f "$LOG_FILE" 2>/dev/null; then
+            echo "  - ✓ 已删除日志文件"
+        else
+            echo "  - ✗ 删除日志文件失败 (可能需要权限)"
+            files_success=false
+        fi
+    else
+        echo "  - 日志文件不存在: $LOG_FILE"
+    fi
+    
+    if [ -d "$CONFIG_DIR" ]; then
+        echo "  - 正在删除配置目录: $CONFIG_DIR"
+        if rm -rf "$CONFIG_DIR" 2>/dev/null; then
+            echo "  - ✓ 已删除配置目录"
+        else
+            echo "  - ✗ 删除配置目录失败 (可能需要权限)"
+            files_success=false
+        fi
+    else
+        echo "  - 配置目录不存在: $CONFIG_DIR"
+    fi
+    
+    if [ "$files_success" = true ]; then
+        ((success_count++))
+    else
+        ((fail_count++))
+    fi
     
     # 6. 删除脚本文件
     echo "6. 删除脚本文件..."
     local paths=("/usr/local/bin/port_mapping_manager.sh" "/usr/local/bin/pmm" "/etc/port_mapping_manager/port_mapping_manager.sh" "/etc/port_mapping_manager/pmm" "$(dirname "$0")/pmm")
+    local deleted_count=0
+    local script_failed=false
+    
     for p in "${paths[@]}"; do 
         if [ -f "$p" ]; then
-            rm -f "$p" && echo "  - 已删除: $p"
+            echo "  - 正在删除: $p"
+            if rm -f "$p" 2>/dev/null; then
+                echo "  - ✓ 已删除: $p"
+                ((deleted_count++))
+            else
+                echo "  - ✗ 删除失败: $p (可能需要权限)"
+                script_failed=true
+            fi
+        else
+            echo "  - 文件不存在: $p"
         fi
     done
+    
+    if [ "$script_failed" = false ] && [ "$deleted_count" -gt 0 ]; then
+        echo "  - ✓ 脚本文件删除成功 (共 $deleted_count 个)"
+        ((success_count++))
+    else
+        echo "  - ✗ 脚本文件删除失败或无文件可删除"
+        ((fail_count++))
+    fi
     
     # 7. 删除当前脚本
     local current_script="$0"
@@ -1479,8 +1628,26 @@ complete_uninstall() {
     echo -e "${GREEN}      完全卸载完成${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo
-    echo "系统已尽可能恢复到安装前的状态。"
+    echo "操作统计: 成功 $success_count 项, 失败 $fail_count 项"
+    
+    if [ "$fail_count" -eq 0 ]; then
+        echo "系统已成功恢复到安装前的状态。"
+    else
+        echo "部分操作失败，请检查权限或手动重试失败的项目。"
+    fi
     echo "注意：某些系统级配置可能需要手动清理。"
+    
+    # 询问是否删除当前脚本
+    echo
+    read -p "是否删除当前脚本文件？(y/N): " delete_self
+    if [[ "$delete_self" =~ ^[Yy]$ ]]; then
+        echo "正在删除当前脚本文件..."
+        if rm -- "$0" 2>/dev/null; then
+            echo "  - ✓ 当前脚本文件已删除"
+        else
+            echo "  - ✗ 删除当前脚本文件失败 (可能需要权限)"
+        fi
+    fi
     echo
     
     # 询问是否立即删除当前脚本
@@ -1513,17 +1680,44 @@ partial_uninstall() {
         rule_comment="$RULE_COMMENT"
     fi
     
-    if [ -n "$(iptables -t nat -L PREROUTING 2>/dev/null | grep "$rule_comment")" ] || 
-       [ -n "$(ip6tables -t nat -L PREROUTING 2>/dev/null | grep "$rule_comment")" ]; then
-        choices+=("rules")
-        descriptions+=("删除 iptables 映射规则")
-        echo "调试：检测到映射规则存在"
-    else
-        echo "调试：未检测到映射规则"
+    echo "调试: 开始检测可卸载内容..."
+    
+    # 检查iptables规则
+    local has_rules=false
+    if command -v iptables &>/dev/null; then
+        if iptables -t nat -L PREROUTING 2>/dev/null | grep -q "$rule_comment"; then
+            has_rules=true
+            echo "调试: 检测到 IPv4 规则"
+        fi
     fi
     
-    if [ -f "/etc/systemd/system/udp-port-mapping.service" ] || 
-       [ -f "/etc/systemd/system/iptables-restore.service" ]; then
+    if command -v ip6tables &>/dev/null; then
+        if ip6tables -t nat -L PREROUTING 2>/dev/null | grep -q "$rule_comment"; then
+            has_rules=true
+            echo "调试: 检测到 IPv6 规则"
+        fi
+    fi
+    
+    if [ "$has_rules" = true ]; then
+        choices+=("rules")
+        descriptions+=("删除 iptables 映射规则")
+    else
+        echo "调试: 未检测到映射规则"
+    fi
+    
+    # 检查systemd服务
+    local has_systemd=false
+    if [[ "$OSTYPE" == "linux-gnu" ]] && command -v systemctl &>/dev/null; then
+        if [ -f "/etc/systemd/system/udp-port-mapping.service" ] || 
+           [ -f "/etc/systemd/system/iptables-restore.service" ]; then
+            has_systemd=true
+            echo "调试: 检测到 systemd 服务文件"
+        fi
+    else
+        echo "调试: 系统不支持 systemd 或 systemctl 不可用"
+    fi
+    
+    if [ "$has_systemd" = true ]; then
         choices+=("systemd")
         descriptions+=("删除 systemd 服务")
     fi
@@ -1538,10 +1732,25 @@ partial_uninstall() {
         descriptions+=("删除配置和日志")
     fi
     
-    if [ -f "/usr/local/bin/pmm" ] || [ -f "/usr/local/bin/port_mapping_manager.sh" ] || 
-       [ -f "/etc/port_mapping_manager/pmm" ] || [ -f "/etc/port_mapping_manager/port_mapping_manager.sh" ]; then
+    # 检查脚本文件
+    local has_scripts=false
+    local script_paths=("/usr/local/bin/pmm" "/usr/local/bin/port_mapping_manager.sh" 
+                       "/etc/port_mapping_manager/pmm" "/etc/port_mapping_manager/port_mapping_manager.sh" 
+                       "$(dirname "$0")/pmm")
+    
+    for path in "${script_paths[@]}"; do
+        if [ -f "$path" ]; then
+            has_scripts=true
+            echo "调试: 检测到脚本文件: $path"
+            break
+        fi
+    done
+    
+    if [ "$has_scripts" = true ]; then
         choices+=("scripts")
         descriptions+=("删除脚本和快捷方式")
+    else
+        echo "调试: 未检测到脚本文件"
     fi
     
     if [ ${#choices[@]} -eq 0 ]; then
@@ -1619,8 +1828,11 @@ partial_uninstall() {
                 read -p "  删除 IPv4 规则? (Y/n): " delete_v4
                 if [[ ! "$delete_v4" =~ ^[nN]$ ]]; then
                     echo "    正在删除 IPv4 规则..."
-                    delete_rules_by_version "4"
-                    echo "    IPv4 规则删除完成"
+                    if delete_rules_by_version "4"; then
+                        echo "    ✓ IPv4 规则删除完成"
+                    else
+                        echo "    ✗ IPv4 规则删除失败"
+                    fi
                 else
                     echo "    跳过 IPv4 规则删除"
                 fi
@@ -1628,8 +1840,11 @@ partial_uninstall() {
                 read -p "  删除 IPv6 规则? (Y/n): " delete_v6
                 if [[ ! "$delete_v6" =~ ^[nN]$ ]]; then
                     echo "    正在删除 IPv6 规则..."
-                    delete_rules_by_version "6"
-                    echo "    IPv6 规则删除完成"
+                    if delete_rules_by_version "6"; then
+                        echo "    ✓ IPv6 规则删除完成"
+                    else
+                        echo "    ✗ IPv6 规则删除失败"
+                    fi
                 else
                     echo "    跳过 IPv6 规则删除"
                 fi
@@ -1637,24 +1852,36 @@ partial_uninstall() {
                 read -p "  保存当前状态? (Y/n): " save_state
                 if [[ ! "$save_state" =~ ^[nN]$ ]]; then
                     echo "    正在保存当前状态..."
-                    save_rules
-                    echo "    状态保存完成"
+                    if save_rules; then
+                        echo "    ✓ 状态保存完成"
+                    else
+                        echo "    ✗ 状态保存失败"
+                    fi
                 else
                     echo "    跳过状态保存"
                 fi
                 ;;
             "systemd")
                 echo "2. 清理 systemd 服务..."
-                if command -v systemctl &>/dev/null; then
-                    cleanup_systemd_services
+                if [[ "$OSTYPE" == "linux-gnu" ]] && command -v systemctl &>/dev/null; then
+                    if cleanup_systemd_services; then
+                        echo "  ✓ systemd 服务清理完成"
+                    else
+                        echo "  ✗ systemd 服务清理失败"
+                    fi
                 else
-                    echo "  - systemctl 命令不可用，跳过 systemd 服务清理"
+                    echo "  - 当前系统不支持 systemd 或 systemctl 不可用，跳过"
                 fi
                 ;;
             "backup")
                 echo "3. 删除备份文件..."
                 if [ -d "$BACKUP_DIR" ]; then
-                    rm -rf "$BACKUP_DIR" && echo "  - 已删除备份目录: $BACKUP_DIR" || echo "  - 删除备份目录失败"
+                    echo "  - 正在删除备份目录: $BACKUP_DIR"
+                    if rm -rf "$BACKUP_DIR" 2>/dev/null; then
+                        echo "  - ✓ 已删除备份目录"
+                    else
+                        echo "  - ✗ 删除备份目录失败 (可能需要权限)"
+                    fi
                 else
                     echo "  - 备份目录不存在: $BACKUP_DIR"
                 fi
@@ -1662,33 +1889,51 @@ partial_uninstall() {
             "config")
                 echo "4. 删除配置和日志..."
                 if [ -f "$LOG_FILE" ]; then
-                    rm -f "$LOG_FILE" && echo "  - 已删除日志文件: $LOG_FILE" || echo "  - 删除日志文件失败"
+                    echo "  - 正在删除日志文件: $LOG_FILE"
+                    if rm -f "$LOG_FILE" 2>/dev/null; then
+                        echo "  - ✓ 已删除日志文件"
+                    else
+                        echo "  - ✗ 删除日志文件失败 (可能需要权限)"
+                    fi
                 else
                     echo "  - 日志文件不存在: $LOG_FILE"
                 fi
+                
                 if [ -d "$CONFIG_DIR" ]; then
-                    rm -rf "$CONFIG_DIR" && echo "  - 已删除配置目录: $CONFIG_DIR" || echo "  - 删除配置目录失败"
+                    echo "  - 正在删除配置目录: $CONFIG_DIR"
+                    if rm -rf "$CONFIG_DIR" 2>/dev/null; then
+                        echo "  - ✓ 已删除配置目录"
+                    else
+                        echo "  - ✗ 删除配置目录失败 (可能需要权限)"
+                    fi
                 else
                     echo "  - 配置目录不存在: $CONFIG_DIR"
                 fi
                 ;;
             "scripts")
                 echo "5. 删除脚本和快捷方式..."
-                local paths=("/usr/local/bin/port_mapping_manager.sh" "/usr/local/bin/pmm" "/etc/port_mapping_manager/port_mapping_manager.sh" "/etc/port_mapping_manager/pmm" "$(dirname "$0")/pmm")
+                local paths=("/usr/local/bin/port_mapping_manager.sh" "/usr/local/bin/pmm" 
+                           "/etc/port_mapping_manager/port_mapping_manager.sh" "/etc/port_mapping_manager/pmm" 
+                           "$(dirname "$0")/pmm")
                 local deleted_count=0
+                local failed_count=0
+                
                 for p in "${paths[@]}"; do 
                     if [ -f "$p" ]; then
-                        if rm -f "$p"; then
-                            echo "  - 已删除: $p"
+                        echo "  - 正在删除: $p"
+                        if rm -f "$p" 2>/dev/null; then
+                            echo "  - ✓ 已删除: $p"
                             ((deleted_count++))
                         else
-                            echo "  - 删除失败: $p (可能需要权限)"
+                            echo "  - ✗ 删除失败: $p (可能需要权限)"
+                            ((failed_count++))
                         fi
                     else
                         echo "  - 文件不存在: $p"
                     fi
                 done
-                echo "    共删除了 $deleted_count 个脚本文件"
+                
+                echo "    脚本删除统计: 成功 $deleted_count 个, 失败 $failed_count 个"
                 ;;
         esac
         echo
