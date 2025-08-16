@@ -1437,7 +1437,7 @@ check_for_updates() {
     echo -e "${BLUE}正在检查更新...${NC}"
     
     # GitHub仓库信息
-    local REPO_URL="https://api.github.com/repos/pjy02/Port-Mapping-Manage"
+    local REPO_URL="https://api.github.com/repos/pjy02/Port-Mapping-Manage/releases/latest"
     local SCRIPT_URL="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main/port_mapping_manager.sh"
     local INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main/install_pmm.sh"
     
@@ -1472,11 +1472,20 @@ check_for_updates() {
     # 尝试多种方式获取版本信息
     if grep -q '"tag_name"' "$temp_file"; then
         remote_version=$(grep -o '"tag_name": "[^"]*"' "$temp_file" | cut -d'"' -f4 | sed 's/^v//' | head -1)
+        echo -e "${YELLOW}调试：从tag_name获取版本: $remote_version${NC}"
     fi
     
     # 如果没有找到tag_name，尝试从其他字段获取
     if [ -z "$remote_version" ] && grep -q '"name"' "$temp_file"; then
-        remote_version=$(grep -o '"name": "[^"]*"' "$temp_file" | cut -d'"' -f4 | sed 's/^v//' | head -1)
+        local name_value=$(grep -o '"name": "[^"]*"' "$temp_file" | cut -d'"' -f4 | head -1)
+        echo -e "${YELLOW}调试：name字段值: $name_value${NC}"
+        # 只有当name字段看起来像版本号时才使用
+        if [[ "$name_value" =~ ^[vV]?[0-9]+\.[0-9]+(\.[0-9]+)?([-a-zA-Z0-9]+)?$ ]]; then
+            remote_version=$(echo "$name_value" | sed 's/^[vV]//')
+            echo -e "${YELLOW}调试：从name字段提取版本: $remote_version${NC}"
+        else
+            echo -e "${YELLOW}调试：name字段不是有效的版本号格式${NC}"
+        fi
     fi
     
     # 获取发布说明
@@ -1487,6 +1496,15 @@ check_for_updates() {
     # 清理临时文件
     rm -f "$temp_file"
     
+    # 如果仍然没有获取到版本信息，尝试从脚本文件直接获取
+    if [ -z "$remote_version" ]; then
+        echo -e "${YELLOW}调试：尝试从脚本文件直接获取版本信息${NC}"
+        if curl -s "$SCRIPT_URL" | grep -q "SCRIPT_VERSION="; then
+            remote_version=$(curl -s "$SCRIPT_URL" | grep "SCRIPT_VERSION=" | cut -d'"' -f2 | head -1)
+            echo -e "${YELLOW}调试：从脚本文件获取版本: $remote_version${NC}"
+        fi
+    fi
+    
     # 检查是否成功获取版本信息
     if [ -z "$remote_version" ]; then
         echo -e "${RED}错误：无法获取远程版本信息${NC}"
@@ -1494,11 +1512,15 @@ check_for_updates() {
         echo "  1. GitHub API访问受限"
         echo "  2. 仓库不存在或没有发布版本"
         echo "  3. 网络连接问题"
+        echo "  4. 仓库可能没有创建发布版本"
         echo
         echo -e "${CYAN}建议解决方案：${NC}"
         echo "  1. 检查网络连接"
         echo "  2. 稍后重试"
         echo "  3. 手动访问仓库页面: https://github.com/pjy02/Port-Mapping-Manage"
+        echo "  4. 或者您当前使用的就是最新版本"
+        echo
+        echo -e "${GREEN}当前版本 v${SCRIPT_VERSION} 可能已经是最新版本${NC}"
         return 1
     fi
     
