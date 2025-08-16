@@ -1354,11 +1354,8 @@ uninstall_script() {
         $iptables_cmd -t nat -D PREROUTING "$line_num" 2>/dev/null && echo "  - 删除规则 #$line_num"
     done
 
-    # 2. 询问是否保存当前状态
-    read -p "是否保存规则变更? (y/n): " save_choice
-    if [[ "$save_choice" =~ ^[yY]$ ]]; then
-        save_rules
-    fi
+    # 2. 自动保存当前状态（删除规则后的状态）
+    save_rules
 
     # 3. 询问是否保留备份文件
     read -p "是否保留备份目录 $BACKUP_DIR ? (y/n): " keep_backup
