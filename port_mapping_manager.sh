@@ -5,7 +5,7 @@
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断等功能
 
 # 脚本配置
-SCRIPT_VERSION="3.1"
+SCRIPT_VERSION="3.2"
 RULE_COMMENT="udp-port-mapping-script-v3"
 CONFIG_DIR="/etc/port_mapping_manager"
 LOG_FILE="/var/log/udp-port-mapping.log"
@@ -1426,8 +1426,156 @@ show_version() {
     echo "支持: Hysteria2, v2board, xboard"
     echo
     echo "更新日志:"
+    echo "v3.2 - 完善更新检测功能，优化用户体验"
+    echo "v3.1 - 增加更新检测功能"
     echo "v3.0 - 全面重构，增加诊断、监控、批量操作等功能"
     echo "v2.0 - 原始版本，基础端口映射功能"
+}
+
+# 检查更新功能
+check_for_updates() {
+    echo -e "${BLUE}正在检查更新...${NC}"
+    
+    # GitHub仓库信息
+    local REPO_URL="https://api.github.com/repos/pjy02/Port-Mapping-Manage"
+    local SCRIPT_URL="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main/port_mapping_manager.sh"
+    local INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main/install_pmm.sh"
+    
+    # 临时文件
+    local temp_file="/tmp/pmm_update_check_$$"
+    local temp_script="/tmp/pmm_script_update_$$"
+    
+    # 检查curl是否可用
+    if ! command -v curl &> /dev/null; then
+        echo -e "${RED}错误：curl 命令不可用，无法检查更新${NC}"
+        echo -e "${YELLOW}请手动安装 curl 后重试${NC}"
+        return 1
+    fi
+    
+    # 获取最新版本信息
+    if ! curl -s "$REPO_URL" > "$temp_file" 2>/dev/null; then
+        echo -e "${RED}错误：无法连接到更新服务器${NC}"
+        echo -e "${YELLOW}请检查网络连接或稍后重试${NC}"
+        rm -f "$temp_file"
+        return 1
+    fi
+    
+    # 解析版本信息
+    local remote_version=$(grep -o '"tag_name": "[^"]*"' "$temp_file" | cut -d'"' -f4 | sed 's/^v//')
+    local release_notes=$(grep -o '"body": "[^"]*"' "$temp_file" | cut -d'"' -f4 | sed 's/\\n/\n/g' | head -20)
+    
+    rm -f "$temp_file"
+    
+    if [ -z "$remote_version" ]; then
+        echo -e "${RED}错误：无法获取远程版本信息${NC}"
+        return 1
+    fi
+    
+    echo -e "${CYAN}当前版本: v${SCRIPT_VERSION}${NC}"
+    echo -e "${CYAN}最新版本: v${remote_version}${NC}"
+    echo
+    
+    # 版本比较函数
+    version_compare() {
+        local v1=$1 v2=$2
+        if [[ "$v1" == "$v2" ]]; then
+            echo "equal"
+            return
+        fi
+        
+        local IFS=.
+        local i v1_parts=($v1) v2_parts=($v2)
+        
+        # 填充短版本号
+        while [ ${#v1_parts[@]} -lt ${#v2_parts[@]} ]; do
+            v1_parts+=("0")
+        done
+        while [ ${#v2_parts[@]} -lt ${#v1_parts[@]} ]; do
+            v2_parts+=("0")
+        done
+        
+        for ((i=0; i<${#v1_parts[@]}; i++)); do
+            if [[ ${v1_parts[i]} -lt ${v2_parts[i]} ]]; then
+                echo "older"
+                return
+            elif [[ ${v1_parts[i]} -gt ${v2_parts[i]} ]]; then
+                echo "newer"
+                return
+            fi
+        done
+        
+        echo "equal"
+    }
+    
+    local comparison=$(version_compare "$SCRIPT_VERSION" "$remote_version")
+    
+    case $comparison in
+        "equal")
+            echo -e "${GREEN}✓ 您的脚本已是最新版本${NC}"
+            ;;
+        "newer")
+            echo -e "${YELLOW}⚠ 您的脚本版本比远程版本更新${NC}"
+            echo -e "${CYAN}这可能是开发版本或测试版本${NC}"
+            ;;
+        "older")
+            echo -e "${YELLOW}🔄 发现新版本可用！${NC}"
+            echo
+            echo -e "${BLUE}更新内容:${NC}"
+            echo "$release_notes" | head -10
+            echo "..."
+            echo
+            
+            # 询问是否更新
+            read -p "是否要更新到最新版本? [y/N]: " update_choice
+            case $update_choice in
+                [yY]|[yY][eE][sS])
+                    echo -e "${BLUE}正在下载更新...${NC}"
+                    
+                    # 下载新版本脚本
+                    if ! curl -s "$SCRIPT_URL" > "$temp_script" 2>/dev/null; then
+                        echo -e "${RED}错误：下载更新失败${NC}"
+                        rm -f "$temp_script"
+                        return 1
+                    fi
+                    
+                    # 验证下载的脚本
+                    if [ ! -s "$temp_script" ] || ! grep -q "SCRIPT_VERSION=" "$temp_script"; then
+                        echo -e "${RED}错误：下载的脚本文件无效${NC}"
+                        rm -f "$temp_script"
+                        return 1
+                    fi
+                    
+                    # 备份当前脚本
+                    local backup_path="$BACKUP_DIR/script_backup_$(date +%Y%m%d_%H%M%S).sh"
+                    cp "$0" "$backup_path"
+                    echo -e "${GREEN}✓ 当前脚本已备份到: $backup_path${NC}"
+                    
+                    # 安装新版本
+                    if mv "$temp_script" "$0" && chmod +x "$0"; then
+                        echo -e "${GREEN}✓ 更新成功！${NC}"
+                        echo -e "${YELLOW}请重新运行脚本以使用新版本${NC}"
+                        log_message "INFO" "脚本已从 v${SCRIPT_VERSION} 更新到 v${remote_version}"
+                        exit 0
+                    else
+                        echo -e "${RED}错误：更新失败${NC}"
+                        echo -e "${YELLOW}备份文件位置: $backup_path${NC}"
+                        rm -f "$temp_script"
+                        return 1
+                    fi
+                    ;;
+                *)
+                    echo -e "${CYAN}更新已取消${NC}"
+                    ;;
+            esac
+            ;;
+    esac
+    
+    # 提供手动更新选项
+    echo
+    echo -e "${BLUE}手动更新方法:${NC}"
+    echo "1. 运行安装脚本: curl -sL $INSTALL_SCRIPT_URL | bash"
+    echo "2. 或直接下载: curl -o port_mapping_manager.sh $SCRIPT_URL"
+    echo
 }
 
 # 切换IP版本
@@ -1470,7 +1618,8 @@ show_main_menu() {
     echo " 11. 帮助信息"
     echo " 12. 版本信息"
     echo " 13. 切换IP版本 (IPv4/IPv6)"
-    echo " 14. 退出脚本"
+    echo " 14. 检查更新"
+    echo " 15. 退出脚本"
     echo " 99. 卸载脚本"
     echo
     echo "-----------------------------------------"
@@ -1584,7 +1733,7 @@ initialize_script() {
 main_loop() {
     while true; do
         show_main_menu
-        read -p "请选择操作 [1-14/99]: " main_choice
+        read -p "请选择操作 [1-15/99]: " main_choice
         
         case $main_choice in
             1) setup_mapping ;;
@@ -1600,7 +1749,8 @@ main_loop() {
             11) show_enhanced_help ;;
             12) show_version ;;
             13) switch_ip_version ;;
-            14)
+            14) check_for_updates ;;
+            15)
                 echo -e "${GREEN}感谢使用UDP端口映射脚本！${NC}"
                 log_message "INFO" "脚本正常退出"
                 exit 0
@@ -1609,7 +1759,7 @@ main_loop() {
                 uninstall_script
                 ;;
             *) 
-                echo -e "${RED}无效选择，请输入 1-14 或 99${NC}"
+                echo -e "${RED}无效选择，请输入 1-15 或 99${NC}"
                 ;;
         esac
         
