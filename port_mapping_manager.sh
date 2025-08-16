@@ -1460,14 +1460,45 @@ check_for_updates() {
         return 1
     fi
     
-    # 解析版本信息
-    local remote_version=$(grep -o '"tag_name": "[^"]*"' "$temp_file" | cut -d'"' -f4 | sed 's/^v//')
-    local release_notes=$(grep -o '"body": "[^"]*"' "$temp_file" | cut -d'"' -f4 | sed 's/\\n/\n/g' | head -20)
+    # 调试：显示API响应内容的前几行
+    echo -e "${YELLOW}调试信息：API响应内容${NC}"
+    head -10 "$temp_file" 2>/dev/null | sed 's/^/  /'
+    echo
     
+    # 解析版本信息 - 改进的解析逻辑
+    local remote_version=""
+    local release_notes=""
+    
+    # 尝试多种方式获取版本信息
+    if grep -q '"tag_name"' "$temp_file"; then
+        remote_version=$(grep -o '"tag_name": "[^"]*"' "$temp_file" | cut -d'"' -f4 | sed 's/^v//' | head -1)
+    fi
+    
+    # 如果没有找到tag_name，尝试从其他字段获取
+    if [ -z "$remote_version" ] && grep -q '"name"' "$temp_file"; then
+        remote_version=$(grep -o '"name": "[^"]*"' "$temp_file" | cut -d'"' -f4 | sed 's/^v//' | head -1)
+    fi
+    
+    # 获取发布说明
+    if grep -q '"body"' "$temp_file"; then
+        release_notes=$(grep -o '"body": "[^"]*"' "$temp_file" | cut -d'"' -f4 | sed 's/\\\\n/\n/g' | head -20)
+    fi
+    
+    # 清理临时文件
     rm -f "$temp_file"
     
+    # 检查是否成功获取版本信息
     if [ -z "$remote_version" ]; then
         echo -e "${RED}错误：无法获取远程版本信息${NC}"
+        echo -e "${YELLOW}可能的原因：${NC}"
+        echo "  1. GitHub API访问受限"
+        echo "  2. 仓库不存在或没有发布版本"
+        echo "  3. 网络连接问题"
+        echo
+        echo -e "${CYAN}建议解决方案：${NC}"
+        echo "  1. 检查网络连接"
+        echo "  2. 稍后重试"
+        echo "  3. 手动访问仓库页面: https://github.com/pjy02/Port-Mapping-Manage"
         return 1
     fi
     
