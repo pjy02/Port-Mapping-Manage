@@ -1401,30 +1401,36 @@ cleanup_systemd_services() {
     if [[ "$OSTYPE" != "linux-gnu" ]] || ! command -v systemctl &>/dev/null; then
         echo "  - 当前系统不支持 systemd 或 systemctl 命令不可用"
         echo "  - 跳过 systemd 服务清理"
-        return 0
+        return 1
     fi
     
     local services=("udp-port-mapping.service" "iptables-restore.service")
     local service_files=("/etc/systemd/system/udp-port-mapping.service" "/etc/systemd/system/iptables-restore.service")
+    local operation_success=true
+    local service_found=false
     
     # 停止并禁用服务
     for service in "${services[@]}"; do
         echo "  - 检查服务: $service"
         if systemctl is-enabled "$service" &>/dev/null; then
+            service_found=true
             if systemctl disable "$service" 2>/dev/null; then
                 echo "  - ✓ 已禁用 $service"
             else
                 echo "  - ✗ 禁用 $service 失败"
+                operation_success=false
             fi
         else
             echo "  - 服务 $service 未启用"
         fi
         
         if systemctl is-active "$service" &>/dev/null; then
+            service_found=true
             if systemctl stop "$service" 2>/dev/null; then
                 echo "  - ✓ 已停止 $service"
             else
                 echo "  - ✗ 停止 $service 失败"
+                operation_success=false
             fi
         else
             echo "  - 服务 $service 未运行"
@@ -1435,10 +1441,12 @@ cleanup_systemd_services() {
     for service_file in "${service_files[@]}"; do
         echo "  - 检查服务文件: $service_file"
         if [ -f "$service_file" ]; then
+            service_found=true
             if rm -f "$service_file" 2>/dev/null; then
                 echo "  - ✓ 已删除 $service_file"
             else
                 echo "  - ✗ 删除 $service_file 失败 (可能需要权限)"
+                operation_success=false
             fi
         else
             echo "  - 服务文件不存在: $service_file"
@@ -1450,9 +1458,23 @@ cleanup_systemd_services() {
         echo "  - ✓ systemd 重新加载完成"
     else
         echo "  - ✗ systemd 重新加载失败"
+        operation_success=false
     fi
     
     echo "systemd 服务清理完成"
+    
+    # 如果没有找到任何服务或服务文件，返回失败
+    if [ "$service_found" = false ]; then
+        echo "  - 未找到任何 systemd 服务或文件"
+        return 1
+    fi
+    
+    # 根据操作结果返回
+    if [ "$operation_success" = true ]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # 清理netfilter-persistent状态
@@ -1464,7 +1486,14 @@ cleanup_netfilter_persistent() {
         if [ -d "/etc/iptables" ]; then
             echo "  - 检测到 /etc/iptables 目录，可能包含 netfilter-persistent 配置"
             echo "  - 注意：netfilter-persistent 的规则文件需要手动清理"
+            return 0
+        else
+            echo "  - 未找到 /etc/iptables 目录"
+            return 1
         fi
+    else
+        echo "  - netfilter-persistent 命令不可用"
+        return 1
     fi
 }
 
@@ -1885,7 +1914,8 @@ partial_uninstall() {
                         ((fail_count++))
                     fi
                 else
-                    echo "  - 当前系统不支持 systemd 或 systemctl 不可用，跳过"
+                    echo "  - 当前系统不支持 systemd 或 systemctl 不可用"
+                    ((fail_count++))
                 fi
                 ;;
             "backup")
@@ -1901,19 +1931,21 @@ partial_uninstall() {
                     fi
                 else
                     echo "  - 备份目录不存在: $BACKUP_DIR"
+                    ((fail_count++))
                 fi
                 ;;
             "config")
                 echo "4. 删除配置和日志..."
-                local config_success=true
+                local config_success=false
+                local config_deleted=false
                 
                 if [ -f "$LOG_FILE" ]; then
                     echo "  - 正在删除日志文件: $LOG_FILE"
                     if rm -f "$LOG_FILE" 2>/dev/null; then
                         echo "  - ✓ 已删除日志文件"
+                        config_deleted=true
                     else
                         echo "  - ✗ 删除日志文件失败 (可能需要权限)"
-                        config_success=false
                     fi
                 else
                     echo "  - 日志文件不存在: $LOG_FILE"
@@ -1923,15 +1955,16 @@ partial_uninstall() {
                     echo "  - 正在删除配置目录: $CONFIG_DIR"
                     if rm -rf "$CONFIG_DIR" 2>/dev/null; then
                         echo "  - ✓ 已删除配置目录"
+                        config_deleted=true
                     else
                         echo "  - ✗ 删除配置目录失败 (可能需要权限)"
-                        config_success=false
                     fi
                 else
                     echo "  - 配置目录不存在: $CONFIG_DIR"
                 fi
                 
-                if [ "$config_success" = true ]; then
+                if [ "$config_deleted" = true ]; then
+                    config_success=true
                     ((success_count++))
                 else
                     ((fail_count++))
@@ -1960,11 +1993,16 @@ partial_uninstall() {
                     fi
                 done
                 
-                if [ "$script_failed" = false ] && [ "$deleted_count" -gt 0 ]; then
-                    echo "  - ✓ 脚本文件删除成功 (共 $deleted_count 个)"
-                    ((success_count++))
+                if [ "$deleted_count" -gt 0 ]; then
+                    if [ "$script_failed" = false ]; then
+                        echo "  - ✓ 脚本文件删除成功 (共 $deleted_count 个)"
+                        ((success_count++))
+                    else
+                        echo "  - ⚠ 脚本文件部分删除成功 (成功 $deleted_count 个，部分失败)"
+                        ((success_count++))
+                    fi
                 else
-                    echo "  - ✗ 脚本文件删除失败或无文件可删除"
+                    echo "  - ✗ 未找到可删除的脚本文件"
                     ((fail_count++))
                 fi
                 ;;
