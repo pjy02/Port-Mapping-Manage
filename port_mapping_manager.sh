@@ -5,7 +5,7 @@
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断等功能
 
 # 脚本配置
-SCRIPT_VERSION="3.2"
+SCRIPT_VERSION="3.3"
 RULE_COMMENT="udp-port-mapping-script-v3"
 CONFIG_DIR="/etc/port_mapping_manager"
 LOG_FILE="/var/log/udp-port-mapping.log"
