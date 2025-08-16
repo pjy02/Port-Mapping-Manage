@@ -1339,6 +1339,37 @@ full_reset_iptables() {
 
 # --- 一键卸载功能 ---
 
+# 删除指定IP版本的规则
+delete_rules_by_version() {
+    local ip_version=$1
+    local iptables_cmd
+    
+    if [ "$ip_version" = "6" ]; then
+        iptables_cmd="ip6tables"
+    else
+        iptables_cmd="iptables"
+    fi
+    
+    echo "正在删除 IPv${ip_version} 规则..."
+    local rule_lines=( $($iptables_cmd -t nat -L PREROUTING --line-numbers | grep "$RULE_COMMENT" | awk '{print $1}' | sort -nr) )
+    
+    if [ ${#rule_lines[@]} -eq 0 ]; then
+        echo "  - 未找到 IPv${ip_version} 规则"
+        return 0
+    fi
+    
+    local deleted_count=0
+    for line_num in "${rule_lines[@]}"; do
+        if $iptables_cmd -t nat -D PREROUTING "$line_num" 2>/dev/null; then
+            echo "  - 删除 IPv${ip_version} 规则 #$line_num"
+            ((deleted_count++))
+        fi
+    done
+    
+    echo "  - 已删除 $deleted_count 条 IPv${ip_version} 规则"
+    return $deleted_count
+}
+
 uninstall_script() {
     echo -e "${RED}⚠ 即将卸载脚本并删除脚本创建的全部映射规则${NC}"
     read -p "确认继续卸载? (yes/NO): " confirm
@@ -1346,28 +1377,37 @@ uninstall_script() {
         echo "已取消卸载"; return
     fi
 
-    # 1. 删除脚本规则
+    # 1. 删除当前IP版本的规则
     echo "正在删除脚本创建的 iptables 规则..."
-    local iptables_cmd=$(get_iptables_cmd)
-    local rule_lines=( $($iptables_cmd -t nat -L PREROUTING --line-numbers | grep "$RULE_COMMENT" | awk '{print $1}' | sort -nr) )
-    for line_num in "${rule_lines[@]}"; do
-        $iptables_cmd -t nat -D PREROUTING "$line_num" 2>/dev/null && echo "  - 删除规则 #$line_num"
-    done
+    delete_rules_by_version "$IP_VERSION"
+    
+    # 2. 询问是否删除另一个IP版本的规则
+    local other_version
+    if [ "$IP_VERSION" = "4" ]; then
+        other_version="6"
+    else
+        other_version="4"
+    fi
+    
+    read -p "是否同时删除 IPv${other_version} 的规则? (y/N): " delete_other
+    if [[ "$delete_other" =~ ^[yY]$ ]]; then
+        delete_rules_by_version "$other_version"
+    fi
 
-    # 2. 自动保存当前状态（删除规则后的状态）
+    # 3. 自动保存当前状态（删除规则后的状态）
     save_rules
 
-    # 3. 询问是否保留备份文件
+    # 4. 询问是否保留备份文件
     read -p "是否保留备份目录 $BACKUP_DIR ? (y/n): " keep_backup
     if [[ "$keep_backup" =~ ^[nN]$ ]]; then
         rm -rf "$BACKUP_DIR" && echo "已删除备份目录"
     fi
 
-    # 4. 删除配置、日志目录
+    # 5. 删除配置、日志目录
     rm -f "$LOG_FILE"
     rm -rf "$CONFIG_DIR"
 
-    # 5. 删除脚本与快捷启动器 (若位于 /usr/local/bin 或当前目录)
+    # 6. 删除脚本与快捷启动器 (若位于 /usr/local/bin 或当前目录)
     local paths=("/usr/local/bin/port_mapping_manager.sh" "/usr/local/bin/pmm" "/etc/port_mapping_manager/port_mapping_manager.sh" "/etc/port_mapping_manager/pmm" "$(dirname "$0")/pmm")
     for p in "${paths[@]}"; do [ -f "$p" ] && rm -f "$p" && echo "已删除 $p"; done
 
