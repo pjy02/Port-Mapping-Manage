@@ -5,7 +5,7 @@
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断等功能
 
 # 脚本配置
-SCRIPT_VERSION="3.7"
+SCRIPT_VERSION="3.6"
 RULE_COMMENT="udp-port-mapping-script-v3"
 CONFIG_DIR="/etc/port_mapping_manager"
 LOG_FILE="/var/log/udp-port-mapping.log"
@@ -767,8 +767,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/iptables-restore $CONFIG_DIR/current.rules.v4
-ExecStart=/sbin/ip6tables-restore $CONFIG_DIR/current.rules.v6
+ExecStart=/sbin/iptables-restore $CONFIG_DIR/current.rules
 RemainAfterExit=yes
 
 [Install]
@@ -777,9 +776,7 @@ EOF
 
     systemctl daemon-reload
     systemctl enable udp-port-mapping.service
-    systemctl start udp-port-mapping.service
-    echo -e "${GREEN}已创建systemd服务用于规则持久化并启动${NC}"
-    log_message "INFO" "create_systemd_service: 服务已创建并启动"
+    echo -e "${GREEN}已创建systemd服务用于规则持久化${NC}"
 }
 
 # 显示手动保存说明
@@ -828,36 +825,9 @@ save_rules() {
             fi
             ;;
         "systemd")
-            # 保存当前IP版本的规则
             if $iptables_save_cmd > "$rules_file"; then
                 echo -e "${GREEN}✓ 规则已保存到 $rules_file${NC}"
                 log_message "INFO" "规则保存到文件: $rules_file"
-                
-                # 同时保存另一个IP版本的规则（如果存在）
-                local other_ip_version other_iptables_cmd other_rules_file
-                if [ "$IP_VERSION" = "6" ]; then
-                    other_ip_version="4"
-                    other_iptables_cmd="iptables-save"
-                    other_rules_file="$CONFIG_DIR/current.rules.v4"
-                else
-                    other_ip_version="6"
-                    other_iptables_cmd="ip6tables-save"
-                    other_rules_file="$CONFIG_DIR/current.rules.v6"
-                fi
-                
-                # 检查另一个IP版本是否有规则，如果有则保存
-                if [ "$other_ip_version" = "4" ] && iptables -t nat -L PREROUTING -n | grep -q "$RULE_COMMENT"; then
-                    if $other_iptables_cmd > "$other_rules_file" 2>/dev/null; then
-                        echo -e "${GREEN}✓ IPv${other_ip_version}规则已同步保存到 $other_rules_file${NC}"
-                        log_message "INFO" "IPv${other_ip_version}规则同步保存到文件: $other_rules_file"
-                    fi
-                elif [ "$other_ip_version" = "6" ] && ip6tables -t nat -L PREROUTING -n | grep -q "$RULE_COMMENT"; then
-                    if $other_iptables_cmd > "$other_rules_file" 2>/dev/null; then
-                        echo -e "${GREEN}✓ IPv${other_ip_version}规则已同步保存到 $other_rules_file${NC}"
-                        log_message "INFO" "IPv${other_ip_version}规则同步保存到文件: $other_rules_file"
-                    fi
-                fi
-                
                 setup_systemd_service
                 return 0
             fi
@@ -882,8 +852,8 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/iptables-restore $CONFIG_DIR/current.rules.v4
-ExecStart=/sbin/ip6tables-restore $CONFIG_DIR/current.rules.v6
+ExecStart=/sbin/iptables-restore /etc/port_mapping_manager/current.rules.v4
+ExecStart=/sbin/ip6tables-restore /etc/port_mapping_manager/current.rules.v6
 RemainAfterExit=yes
 
 [Install]
@@ -891,15 +861,10 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         systemctl enable iptables-restore.service
-        systemctl start iptables-restore.service
-        echo -e "${GREEN}✓ systemd 服务已创建、启用并启动${NC}"
-        log_message "INFO" "systemd 服务已创建、启用并启动"
+        echo -e "${GREEN}✓ systemd 服务已创建并启用${NC}"
+        log_message "INFO" "systemd 服务已创建并启用"
     else
-        echo -e "${YELLOW}systemd 服务已存在，正在重新加载和启动...${NC}"
-        systemctl daemon-reload
-        systemctl start iptables-restore.service
-        echo -e "${GREEN}✓ systemd 服务已重新加载并启动${NC}"
-        log_message "INFO" "systemd 服务已重新加载并启动"
+        echo -e "${YELLOW}systemd 服务已存在，无需重复创建。${NC}"
     fi
 }
 
