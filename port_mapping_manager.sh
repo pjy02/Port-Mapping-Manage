@@ -1,4 +1,15 @@
-#!/bin/bash
+# 新增协议号转换函数
+protocol_number_to_name() {
+  case $1 in
+    6) echo "tcp";;
+    17) echo "udp";;
+    *) echo "$1";;
+  esac
+}
+
+# 修改协议显示部分（原326行附近）
+local protocol_num=$(echo "$rule" | awk '{print $3}')
+local protocol=$(protocol_number_to_name "$protocol_num")#!/bin/bash
 
 # TCP/UDP端口映射管理脚本 Enhanced v3.3
 # 适用于 Hysteria2 机场端口跳跃配置
@@ -418,6 +429,15 @@ handle_iptables_error() {
     return $exit_code
 }
 
+# 协议号转名称
+protocol_number_to_name() {
+  case $1 in
+    6) echo "tcp";;
+    17) echo "udp";;
+    *) echo "$1";;
+  esac
+}
+
 # --- 核心功能增强 ---
 
 # 增强的规则显示
@@ -453,7 +473,8 @@ show_rules_for_version() {
         
         local line_num=$(echo "$rule" | awk '{print $1}')
         local target=$(echo "$rule" | awk '{print $2}')
-        local protocol=$(echo "$rule" | awk '{print $3}')
+        local protocol_num=$(echo "$rule" | awk '{print $3}')
+        local protocol=$(protocol_number_to_name "$protocol_num")
         local source=$(echo "$rule" | awk '{print $4}')
         local destination=$(echo "$rule" | awk '{print $5}')
         local origin="外部"
