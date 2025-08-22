@@ -867,6 +867,19 @@ setup_systemd_service() {
         systemctl daemon-reload
     fi
     
+    # 确保规则文件存在
+    local rules_file_v4="$CONFIG_DIR/current.rules.v4"
+    local rules_file_v6="$CONFIG_DIR/current.rules.v6"
+    
+    # 创建规则文件（如果不存在）
+    if [ ! -f "$rules_file_v4" ]; then
+        iptables-save > "$rules_file_v4" 2>/dev/null
+    fi
+    
+    if [ ! -f "$rules_file_v6" ]; then
+        ip6tables-save > "$rules_file_v6" 2>/dev/null
+    fi
+    
     echo "正在创建 systemd 服务..."
     cat > "$service_file" <<EOF
 [Unit]
@@ -875,8 +888,8 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/iptables-restore /etc/port_mapping_manager/current.rules.v4
-ExecStart=/sbin/ip6tables-restore /etc/port_mapping_manager/current.rules.v6
+ExecStart=/sbin/iptables-restore $rules_file_v4
+ExecStart=/sbin/ip6tables-restore $rules_file_v6
 RemainAfterExit=yes
 
 [Install]
