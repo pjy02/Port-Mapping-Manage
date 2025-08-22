@@ -8,8 +8,11 @@ protocol_number_to_name() {
 }
 
 # 修改协议显示部分（原326行附近）
-local protocol_num=$(echo "$rule" | awk '{print $3}')
-local protocol=$(protocol_number_to_name "$protocol_num")#!/bin/bash
+#!/bin/bash
+
+# 修正变量声明作用域
+protocol_num=$(echo "$rule" | awk '{print $3}')
+protocol=$(protocol_number_to_name "$protocol_num")
 
 # TCP/UDP端口映射管理脚本 Enhanced v3.3
 # 适用于 Hysteria2 机场端口跳跃配置
@@ -33,11 +36,11 @@ readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
 # 全局变量
-PACKAGE_MANAGER=""
-PERSISTENT_METHOD=""
-VERBOSE_MODE=false
-AUTO_BACKUP=true
-IP_VERSION="4" # 默认使用IPv4
+declare -g PACKAGE_MANAGER=""
+declare -g PERSISTENT_METHOD=""
+declare -g VERBOSE_MODE=false
+declare -g AUTO_BACKUP=true
+declare -g IP_VERSION="4"
 
 # --- 日志和安全函数 ---
 
