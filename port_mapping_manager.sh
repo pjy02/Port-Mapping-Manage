@@ -454,6 +454,12 @@ show_rules_for_version() {
         local line_num=$(echo "$rule" | awk '{print $1}')
         local target=$(echo "$rule" | awk '{print $2}')
         local protocol=$(echo "$rule" | awk '{print $3}')
+        # 将协议数值转换为协议名称
+        case "$protocol" in
+            6) protocol="tcp" ;;
+            17) protocol="udp" ;;
+            0) protocol="all" ;;
+        esac
         local source=$(echo "$rule" | awk '{print $4}')
         local destination=$(echo "$rule" | awk '{print $5}')
         local origin="外部"
