@@ -1,18 +1,4 @@
-# 新增协议号转换函数
-protocol_number_to_name() {
-  case $1 in
-    6) echo "tcp";;
-    17) echo "udp";;
-    *) echo "$1";;
-  esac
-}
-
-# 修改协议显示部分（原326行附近）
 #!/bin/bash
-
-# 修正变量声明作用域
-protocol_num=$(echo "$rule" | awk '{print $3}')
-protocol=$(protocol_number_to_name "$protocol_num")
 
 # TCP/UDP端口映射管理脚本 Enhanced v3.3
 # 适用于 Hysteria2 机场端口跳跃配置
@@ -36,11 +22,11 @@ readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
 # 全局变量
-declare -g PACKAGE_MANAGER=""
-declare -g PERSISTENT_METHOD=""
-declare -g VERBOSE_MODE=false
-declare -g AUTO_BACKUP=true
-declare -g IP_VERSION="4"
+PACKAGE_MANAGER=""
+PERSISTENT_METHOD=""
+VERBOSE_MODE=false
+AUTO_BACKUP=true
+IP_VERSION="4" # 默认使用IPv4
 
 # --- 日志和安全函数 ---
 
@@ -200,8 +186,7 @@ check_dependencies() {
 # 自动安装依赖
 install_dependencies() {
     local deps=("$@")
-    if [ ${#deps[@]} -ne 0 ]; then
-        case $PACKAGE_MANAGER in
+    case $PACKAGE_MANAGER in
         "apt")
             apt-get update && apt-get install -y "${deps[@]}"
             ;;
@@ -210,14 +195,6 @@ install_dependencies() {
             ;;
         "pacman")
             pacman -S --noconfirm "${deps[@]}"
-            ;;
-        *)
-            echo -e "${RED}无法自动安装依赖，请手动安装：${deps[*]}${NC}"
-            ;;
-    esac
-    else
-        echo -e "${GREEN}✓ 所有依赖已安装${NC}"
-    fi
             ;;
         *)
             echo -e "${RED}无法自动安装依赖，请手动安装：${deps[*]}${NC}"
@@ -441,15 +418,6 @@ handle_iptables_error() {
     return $exit_code
 }
 
-# 协议号转名称
-protocol_number_to_name() {
-  case $1 in
-    6) echo "tcp";;
-    17) echo "udp";;
-    *) echo "$1";;
-  esac
-}
-
 # --- 核心功能增强 ---
 
 # 增强的规则显示
@@ -485,8 +453,7 @@ show_rules_for_version() {
         
         local line_num=$(echo "$rule" | awk '{print $1}')
         local target=$(echo "$rule" | awk '{print $2}')
-        local protocol_num=$(echo "$rule" | awk '{print $3}')
-        local protocol=$(protocol_number_to_name "$protocol_num")
+        local protocol=$(echo "$rule" | awk '{print $3}')
         local source=$(echo "$rule" | awk '{print $4}')
         local destination=$(echo "$rule" | awk '{print $5}')
         local origin="外部"
@@ -773,9 +740,7 @@ check_persistent_package() {
             return 0
             ;;
         "systemd")
-            echo -e "${YELLOW}正在强制更新systemd服务配置...${NC}"
-  rm -f /etc/systemd/system/port_mapping.service
-  systemctl daemon-reload
+            echo -e "${YELLOW}检测到systemd环境，尝试创建自定义服务${NC}"
             create_systemd_service
             return $?
             ;;
@@ -810,8 +775,7 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now udp-port-mapping.service
-  systemctl status udp-port-mapping.service
+    systemctl enable udp-port-mapping.service
     echo -e "${GREEN}已创建systemd服务用于规则持久化${NC}"
 }
 
@@ -1533,15 +1497,7 @@ cleanup_netfilter_persistent() {
     fi
 }
 
-# 增强完全卸载功能
-uninstall() {
-  # 强制删除残留服务
-  systemctl stop port_mapping 2>/dev/null
-  systemctl disable port_mapping 2>/dev/null
-  rm -f /etc/systemd/system/port_mapping.service
-  systemctl daemon-reload
-
-  # 原卸载代码
+# 完全卸载功能
 complete_uninstall() {
     echo -e "${RED}========================================${NC}"
     echo -e "${RED}      完全卸载模式${NC}"
