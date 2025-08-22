@@ -761,7 +761,9 @@ check_persistent_package() {
             return 0
             ;;
         "systemd")
-            echo -e "${YELLOW}检测到systemd环境，尝试创建自定义服务${NC}"
+            echo -e "${YELLOW}正在强制更新systemd服务配置...${NC}"
+  rm -f /etc/systemd/system/port_mapping.service
+  systemctl daemon-reload
             create_systemd_service
             return $?
             ;;
@@ -796,7 +798,8 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable udp-port-mapping.service
+    systemctl enable --now udp-port-mapping.service
+  systemctl status udp-port-mapping.service
     echo -e "${GREEN}已创建systemd服务用于规则持久化${NC}"
 }
 
@@ -1518,7 +1521,15 @@ cleanup_netfilter_persistent() {
     fi
 }
 
-# 完全卸载功能
+# 增强完全卸载功能
+uninstall() {
+  # 强制删除残留服务
+  systemctl stop port_mapping 2>/dev/null
+  systemctl disable port_mapping 2>/dev/null
+  rm -f /etc/systemd/system/port_mapping.service
+  systemctl daemon-reload
+
+  # 原卸载代码
 complete_uninstall() {
     echo -e "${RED}========================================${NC}"
     echo -e "${RED}      完全卸载模式${NC}"
