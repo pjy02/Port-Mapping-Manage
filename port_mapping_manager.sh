@@ -782,7 +782,8 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/iptables-restore $CONFIG_DIR/current.rules
+ExecStart=/sbin/iptables-restore ${CONFIG_DIR}/current.rules.v4
+ExecStart=/sbin/ip6tables-restore ${CONFIG_DIR}/current.rules.v6
 RemainAfterExit=yes
 
 [Install]
@@ -888,8 +889,8 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/iptables-restore ${CONFIG_DIR}/rules.v4
-ExecStart=/sbin/ip6tables-restore ${CONFIG_DIR}/rules.v6
+ExecStart=/sbin/iptables-restore ${CONFIG_DIR}/current.rules.v4
+ExecStart=/sbin/ip6tables-restore ${CONFIG_DIR}/current.rules.v6
 RemainAfterExit=yes
 
 [Install]
