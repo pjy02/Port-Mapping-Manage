@@ -766,6 +766,15 @@ check_persistent_package() {
 create_systemd_service() {
     local service_file="/etc/systemd/system/udp-port-mapping.service"
     
+    # 检查并清理可能存在的旧服务
+    if [ -f "$service_file" ]; then
+        echo "正在清理旧的 systemd 服务..."
+        systemctl disable udp-port-mapping.service 2>/dev/null
+        systemctl stop udp-port-mapping.service 2>/dev/null
+        rm -f "$service_file"
+        systemctl daemon-reload
+    fi
+    
     cat > "$service_file" << EOF
 [Unit]
 Description=UDP Port Mapping Rules
@@ -849,9 +858,17 @@ save_rules() {
 # 配置 systemd 服务以实现持久化
 setup_systemd_service() {
     local service_file="/etc/systemd/system/iptables-restore.service"
-    if [ ! -f "$service_file" ]; then
-        echo "正在创建 systemd 服务..."
-        cat > "$service_file" <<EOF
+    # 检查并清理可能存在的旧服务
+    if [ -f "$service_file" ]; then
+        echo "正在清理旧的 systemd 服务..."
+        systemctl disable iptables-restore.service 2>/dev/null
+        systemctl stop iptables-restore.service 2>/dev/null
+        rm -f "$service_file"
+        systemctl daemon-reload
+    fi
+    
+    echo "正在创建 systemd 服务..."
+    cat > "$service_file" <<EOF
 [Unit]
 Description=Restore iptables rules
 After=network.target
@@ -865,13 +882,10 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-        systemctl enable iptables-restore.service
-        echo -e "${GREEN}✓ systemd 服务已创建并启用${NC}"
-        log_message "INFO" "systemd 服务已创建并启用"
-    else
-        echo -e "${YELLOW}systemd 服务已存在，无需重复创建。${NC}"
-    fi
+    systemctl daemon-reload
+    systemctl enable iptables-restore.service
+    echo -e "${GREEN}✓ systemd 服务已创建并启用${NC}"
+    log_message "INFO" "systemd 服务已创建并启用"
 }
 
 # --- 新增功能：批量操作 ---
