@@ -531,6 +531,52 @@ check_rule_active() {
     return 1
 }
 
+# 获取服务端口和对应进程
+get_service_ports_and_processes() {
+    local iptables_cmd=$(get_iptables_cmd $IP_VERSION)
+    if [ -z "$iptables_cmd" ]; then
+        return
+    fi
+    
+    # 获取所有服务端口
+    local service_ports=()
+    while read -r line; do
+        if echo "$line" | grep -q "$RULE_COMMENT"; then
+            local port=$(echo "$line" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p')
+            if [ -n "$port" ] && [[ "$port" =~ ^[0-9]+$ ]]; then
+                service_ports+=("$port")
+            fi
+        fi
+    done < <($iptables_cmd -t nat -L PREROUTING -n 2>/dev/null)
+    
+    # 去重
+    local unique_ports=($(echo "${service_ports[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
+    echo "${unique_ports[@]}"
+}
+
+# 获取端口对应的进程信息
+get_process_by_port() {
+    local port=$1
+    local protocol=${2:-udp}
+    
+    # 使用ss命令获取监听指定端口的进程
+    if [ "$protocol" = "udp" ]; then
+        ss -ulnp | grep ":$port " | awk '{print $7}' | sed 's/.*pid=\([0-9]*\).*/\1/' | head -1
+    else
+        ss -tlnp | grep ":$port " | awk '{print $7}' | sed 's/.*pid=\([0-9]*\).*/\1/' | head -1
+    fi
+}
+
+# 获取进程名称
+get_process_name() {
+    local pid=$1
+    if [ -n "$pid" ] && [ -f "/proc/$pid/comm" ]; then
+        cat "/proc/$pid/comm"
+    elif [ -n "$pid" ]; then
+        ps -p "$pid" -o comm= 2>/dev/null
+    fi
+}
+
 # 流量统计显示
 show_traffic_stats() {
     echo -e "\n${CYAN}流量统计概览：${NC}"
@@ -540,25 +586,141 @@ show_traffic_stats() {
         return
     fi
 
-        local total_packets=0
-        local total_bytes=0
+    local total_packets=0
+    local total_bytes=0
 
-        # 获取NAT表统计信息
-        while read -r line; do
-            if echo "$line" | grep -q "$RULE_COMMENT"; then
-                local packets=$(echo "$line" | awk '{print $1}' | tr -d '[]')
-                local bytes=$(echo "$line" | awk '{print $2}' | tr -d '[]')
-                if [[ "$packets" =~ ^[0-9]+$ ]] && [[ "$bytes" =~ ^[0-9]+$ ]]; then
-                    total_packets=$((total_packets + packets))
-                    total_bytes=$((total_bytes + bytes))
-                fi
+    # 获取NAT表统计信息
+    while read -r line; do
+        if echo "$line" | grep -q "$RULE_COMMENT"; then
+            local packets=$(echo "$line" | awk '{print $1}' | tr -d '[]')
+            local bytes=$(echo "$line" | awk '{print $2}' | tr -d '[]')
+            if [[ "$packets" =~ ^[0-9]+$ ]] && [[ "$bytes" =~ ^[0-9]+$ ]]; then
+                total_packets=$((total_packets + packets))
+                total_bytes=$((total_bytes + bytes))
             fi
-        done < <($iptables_cmd -t nat -L PREROUTING -v -n 2>/dev/null)
+        fi
+    done < <($iptables_cmd -t nat -L PREROUTING -v -n 2>/dev/null)
 
     if [ "$total_packets" -gt 0 ] || [ "$total_bytes" -gt 0 ]; then
-        echo -e "${YELLOW}--- IPv${IP_VERSION} 流量 ---${NC}"
+        echo -e "${YELLOW}--- IPv${IP_VERSION} 规则流量 ---${NC}"
         echo "总数据包: $total_packets"
         echo "总字节数: $(format_bytes $total_bytes)"
+    fi
+
+    # 获取服务端口列表
+    local service_ports=($(get_service_ports_and_processes))
+    
+    if [ ${#service_ports[@]} -eq 0 ]; then
+        echo -e "\n${YELLOW}未找到服务端口${NC}"
+        return
+    fi
+    
+    # 统计每个服务端口的流量
+    for service_port in "${service_ports[@]}"; do
+        # 获取端口对应的进程
+        local udp_pid=$(get_process_by_port "$service_port" "udp")
+        local tcp_pid=$(get_process_by_port "$service_port" "tcp")
+        
+        if [ -n "$udp_pid" ] || [ -n "$tcp_pid" ]; then
+            echo -e "\n${YELLOW}--- 端口 $service_port 进程流量 ---${NC}"
+            
+            # 显示进程信息
+            if [ -n "$udp_pid" ]; then
+                local udp_process_name=$(get_process_name "$udp_pid")
+                echo "UDP进程PID: $udp_pid ($udp_process_name)"
+            fi
+            if [ -n "$tcp_pid" ]; then
+                local tcp_process_name=$(get_process_name "$tcp_pid")
+                echo "TCP进程PID: $tcp_pid ($tcp_process_name)"
+            fi
+            
+            # 统计网络连接数
+            if [ -n "$udp_pid" ]; then
+                local udp_connections=$(ss -unp | grep "$udp_pid" | wc -l)
+                echo "活跃UDP连接数: $udp_connections"
+            fi
+            if [ -n "$tcp_pid" ]; then
+                local tcp_connections=$(ss -tnp | grep "$tcp_pid" | wc -l)
+                echo "活跃TCP连接数: $tcp_connections"
+            fi
+            
+            # 统计IPv4 UDP流量
+            if [ -f "/proc/net/udp" ] && [ -n "$udp_pid" ]; then
+                local port_hex=$(printf '%04X' $service_port)
+                local udp_stats=$(grep "$port_hex" /proc/net/udp | head -1)
+                if [ -n "$udp_stats" ]; then
+                    local udp_packets=$(echo "$udp_stats" | awk '{print $3}')
+                    local udp_bytes=$(echo "$udp_stats" | awk '{print $5}')
+                    if [[ "$udp_packets" =~ ^[0-9A-Fa-f]+$ ]] && [[ "$udp_bytes" =~ ^[0-9A-Fa-f]+$ ]]; then
+                        echo "IPv4 UDP端口$service_port数据包: $((0x$udp_packets))"
+                        echo "IPv4 UDP端口$service_port字节数: $(format_bytes $((0x$udp_bytes)))"
+                    fi
+                fi
+            fi
+            
+            # 统计IPv6 UDP流量
+            if [ -f "/proc/net/udp6" ] && [ -n "$udp_pid" ]; then
+                local port_hex6=$(printf '%04X' $service_port)
+                local udp6_stats=$(grep "$port_hex6" /proc/net/udp6 | head -1)
+                if [ -n "$udp6_stats" ]; then
+                    local udp6_packets=$(echo "$udp6_stats" | awk '{print $3}')
+                    local udp6_bytes=$(echo "$udp6_stats" | awk '{print $5}')
+                    if [[ "$udp6_packets" =~ ^[0-9A-Fa-f]+$ ]] && [[ "$udp6_bytes" =~ ^[0-9A-Fa-f]+$ ]]; then
+                        echo "IPv6 UDP端口$service_port数据包: $((0x$udp6_packets))"
+                        echo "IPv6 UDP端口$service_port字节数: $(format_bytes $((0x$udp6_bytes)))"
+                    fi
+                fi
+            fi
+            
+            # 统计IPv4 TCP流量
+            if [ -f "/proc/net/tcp" ] && [ -n "$tcp_pid" ]; then
+                local port_hex_tcp=$(printf '%04X' $service_port)
+                local tcp_stats=$(grep "$port_hex_tcp" /proc/net/tcp | head -1)
+                if [ -n "$tcp_stats" ]; then
+                    local tcp_packets=$(echo "$tcp_stats" | awk '{print $3}')
+                    local tcp_bytes=$(echo "$tcp_stats" | awk '{print $5}')
+                    if [[ "$tcp_packets" =~ ^[0-9A-Fa-f]+$ ]] && [[ "$tcp_bytes" =~ ^[0-9A-Fa-f]+$ ]]; then
+                        echo "IPv4 TCP端口$service_port数据包: $((0x$tcp_packets))"
+                        echo "IPv4 TCP端口$service_port字节数: $(format_bytes $((0x$tcp_bytes)))"
+                    fi
+                fi
+            fi
+            
+            # 统计IPv6 TCP流量
+            if [ -f "/proc/net/tcp6" ] && [ -n "$tcp_pid" ]; then
+                local port_hex_tcp6=$(printf '%04X' $service_port)
+                local tcp6_stats=$(grep "$port_hex_tcp6" /proc/net/tcp6 | head -1)
+                if [ -n "$tcp6_stats" ]; then
+                    local tcp6_packets=$(echo "$tcp6_stats" | awk '{print $3}')
+                    local tcp6_bytes=$(echo "$tcp6_stats" | awk '{print $5}')
+                    if [[ "$tcp6_packets" =~ ^[0-9A-Fa-f]+$ ]] && [[ "$tcp6_bytes" =~ ^[0-9A-Fa-f]+$ ]]; then
+                        echo "IPv6 TCP端口$service_port数据包: $((0x$tcp6_packets))"
+                        echo "IPv6 TCP端口$service_port字节数: $(format_bytes $((0x$tcp6_bytes)))"
+                    fi
+                fi
+            fi
+            
+            # 显示进程网络接口信息
+            echo "\n网络接口信息:"
+            if [ -n "$udp_pid" ]; then
+                ss -unp | grep "$udp_pid" | while read line; do
+                    echo "  UDP: $line"
+                done
+            fi
+            if [ -n "$tcp_pid" ]; then
+                ss -tnp | grep "$tcp_pid" | while read line; do
+                    echo "  TCP: $line"
+                done
+            fi
+        fi
+    done
+    
+    # 检查是否有监控工具可用
+    if command -v nethogs &> /dev/null; then
+        echo -e "\n${GREEN}提示: 可使用 'nethogs -t -p' 进行实时进程流量监控${NC}"
+    fi
+    if command -v iftop &> /dev/null; then
+        echo -e "${GREEN}提示: 可使用 'iftop -i <接口名>' 进行接口流量监控${NC}"
     fi
 }
 
@@ -1170,39 +1332,126 @@ diagnose_system() {
 # 实时监控功能
 monitor_traffic() {
     echo -e "${BLUE}开始实时监控 (按Ctrl+C退出)${NC}"
-    echo -e "${CYAN}时间\t\t数据包\t字节数\t速率${NC}"
     
-    local prev_packets=0
-    local prev_bytes=0
+    # 获取服务端口列表
+    local service_ports=($(get_service_ports_and_processes))
+    
+    if [ ${#service_ports[@]} -eq 0 ]; then
+        echo -e "${YELLOW}未找到服务端口${NC}"
+        return
+    fi
+    
+    # 获取端口对应的进程信息
+    local port_pids=()
+    local port_info=""
+    for service_port in "${service_ports[@]}"; do
+        local udp_pid=$(get_process_by_port "$service_port" "udp")
+        local tcp_pid=$(get_process_by_port "$service_port" "tcp")
+        if [ -n "$udp_pid" ] || [ -n "$tcp_pid" ]; then
+            port_pids+=("$service_port:$udp_pid:$tcp_pid")
+            if [ -n "$udp_pid" ]; then
+                local udp_process_name=$(get_process_name "$udp_pid")
+                port_info="$port_info UDP:$service_port($udp_process_name)"
+            fi
+            if [ -n "$tcp_pid" ]; then
+                local tcp_process_name=$(get_process_name "$tcp_pid")
+                port_info="$port_info TCP:$service_port($tcp_process_name)"
+            fi
+        fi
+    done
+    
+    echo -e "${CYAN}监控端口: $port_info${NC}"
+    echo -e "${CYAN}时间\t\t规则流量\t进程流量\t总速率${NC}"
+    
+    local prev_rule_packets=0
+    local prev_rule_bytes=0
+    local prev_proc_bytes=0
     
     while true; do
-        local current_packets=0
-        local current_bytes=0
+        local current_rule_packets=0
+        local current_rule_bytes=0
+        local current_proc_bytes=0
         
-        # 统计当前流量
+        # 统计iptables规则流量
         while read -r line; do
             if echo "$line" | grep -q "$RULE_COMMENT"; then
                 local packets=$(echo "$line" | awk '{print $1}' | tr -d '[]')
                 local bytes=$(echo "$line" | awk '{print $2}' | tr -d '[]')
                 if [[ "$packets" =~ ^[0-9]+$ ]] && [[ "$bytes" =~ ^[0-9]+$ ]]; then
-                    current_packets=$((current_packets + packets))
-                    current_bytes=$((current_bytes + bytes))
+                    current_rule_packets=$((current_rule_packets + packets))
+                    current_rule_bytes=$((current_rule_bytes + bytes))
                 fi
             fi
         done < <(iptables -t nat -L PREROUTING -v -n)
         
+        # 统计进程流量
+        for port_pid_info in "${port_pids[@]}"; do
+            IFS=':' read -r service_port udp_pid tcp_pid <<< "$port_pid_info"
+            
+            # 统计IPv4 UDP流量
+            if [ -n "$udp_pid" ] && [ -f "/proc/net/udp" ]; then
+                local port_hex=$(printf '%04X' $service_port)
+                local udp_stats=$(grep "$port_hex" /proc/net/udp | head -1)
+                if [ -n "$udp_stats" ]; then
+                    local udp_bytes=$(echo "$udp_stats" | awk '{print $5}')
+                    if [[ "$udp_bytes" =~ ^[0-9A-Fa-f]+$ ]]; then
+                        current_proc_bytes=$((current_proc_bytes + $((0x$udp_bytes))))
+                    fi
+                fi
+            fi
+            
+            # 统计IPv6 UDP流量
+            if [ -n "$udp_pid" ] && [ -f "/proc/net/udp6" ]; then
+                local port_hex6=$(printf '%04X' $service_port)
+                local udp6_stats=$(grep "$port_hex6" /proc/net/udp6 | head -1)
+                if [ -n "$udp6_stats" ]; then
+                    local udp6_bytes=$(echo "$udp6_stats" | awk '{print $5}')
+                    if [[ "$udp6_bytes" =~ ^[0-9A-Fa-f]+$ ]]; then
+                        current_proc_bytes=$((current_proc_bytes + $((0x$udp6_bytes))))
+                    fi
+                fi
+            fi
+            
+            # 统计IPv4 TCP流量
+            if [ -n "$tcp_pid" ] && [ -f "/proc/net/tcp" ]; then
+                local port_hex_tcp=$(printf '%04X' $service_port)
+                local tcp_stats=$(grep "$port_hex_tcp" /proc/net/tcp | head -1)
+                if [ -n "$tcp_stats" ]; then
+                    local tcp_bytes=$(echo "$tcp_stats" | awk '{print $5}')
+                    if [[ "$tcp_bytes" =~ ^[0-9A-Fa-f]+$ ]]; then
+                        current_proc_bytes=$((current_proc_bytes + $((0x$tcp_bytes))))
+                    fi
+                fi
+            fi
+            
+            # 统计IPv6 TCP流量
+            if [ -n "$tcp_pid" ] && [ -f "/proc/net/tcp6" ]; then
+                local port_hex_tcp6=$(printf '%04X' $service_port)
+                local tcp6_stats=$(grep "$port_hex_tcp6" /proc/net/tcp6 | head -1)
+                if [ -n "$tcp6_stats" ]; then
+                    local tcp6_bytes=$(echo "$tcp6_stats" | awk '{print $5}')
+                    if [[ "$tcp6_bytes" =~ ^[0-9A-Fa-f]+$ ]]; then
+                        current_proc_bytes=$((current_proc_bytes + $((0x$tcp6_bytes))))
+                    fi
+                fi
+            fi
+        done
+        
         # 计算速率
-        local packet_rate=$((current_packets - prev_packets))
-        local byte_rate=$((current_bytes - prev_bytes))
+        local rule_packet_rate=$((current_rule_packets - prev_rule_packets))
+        local rule_byte_rate=$((current_rule_bytes - prev_rule_bytes))
+        local proc_byte_rate=$((current_proc_bytes - prev_proc_bytes))
+        local total_byte_rate=$((rule_byte_rate + proc_byte_rate))
         
-        printf "%s\t%d\t%s\t%s/s\n" \
+        printf "%s\t%s\t%s\t%s/s\n" \
             "$(date '+%H:%M:%S')" \
-            "$current_packets" \
-            "$(format_bytes $current_bytes)" \
-            "$(format_bytes $byte_rate)"
+            "$(format_bytes $rule_byte_rate)" \
+            "$(format_bytes $proc_byte_rate)" \
+            "$(format_bytes $total_byte_rate)"
         
-        prev_packets=$current_packets
-        prev_bytes=$current_bytes
+        prev_rule_packets=$current_rule_packets
+        prev_rule_bytes=$current_rule_bytes
+        prev_proc_bytes=$current_proc_bytes
         
         sleep 1
     done
