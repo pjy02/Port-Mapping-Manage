@@ -888,8 +888,8 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/iptables-restore $rules_file_v4
-ExecStart=/sbin/ip6tables-restore $rules_file_v6
+ExecStart=/sbin/iptables-restore ${CONFIG_DIR}/rules.v4
+ExecStart=/sbin/ip6tables-restore ${CONFIG_DIR}/rules.v6
 RemainAfterExit=yes
 
 [Install]
