@@ -212,6 +212,14 @@ install_dependencies() {
             ;;
         *)
             echo -e "${RED}无法自动安装依赖，请手动安装：${deps[*]}${NC}"
+            ;;
+    esac
+  else
+    echo -e "${GREEN}✓ 所有依赖已安装${NC}"
+  fi
+            ;;
+        *)
+            echo -e "${RED}无法自动安装依赖，请手动安装：${deps[*]}${NC}"
             exit 1
             ;;
     esac
