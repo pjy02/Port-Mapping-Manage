@@ -200,7 +200,8 @@ check_dependencies() {
 # 自动安装依赖
 install_dependencies() {
     local deps=("$@")
-    case $PACKAGE_MANAGER in
+    if [ ${#deps[@]} -ne 0 ]; then
+        case $PACKAGE_MANAGER in
         "apt")
             apt-get update && apt-get install -y "${deps[@]}"
             ;;
@@ -214,9 +215,9 @@ install_dependencies() {
             echo -e "${RED}无法自动安装依赖，请手动安装：${deps[*]}${NC}"
             ;;
     esac
-  else
-    echo -e "${GREEN}✓ 所有依赖已安装${NC}"
-  fi
+    else
+        echo -e "${GREEN}✓ 所有依赖已安装${NC}"
+    fi
             ;;
         *)
             echo -e "${RED}无法自动安装依赖，请手动安装：${deps[*]}${NC}"
