@@ -2365,8 +2365,20 @@ diagnose_system() {
         show_current_rules
     fi
     
-    # 7. 性能建议
-    echo -e "\n${CYAN}7. 性能建议:${NC}"
+    # 7. 网络连通性测试
+    echo -e "\n${CYAN}7. 网络连通性测试:${NC}"
+    test_network_connectivity
+    
+    # 8. 系统资源状态
+    echo -e "\n${CYAN}8. 系统资源状态:${NC}"
+    check_system_resources
+    
+    # 9. 安全性检查
+    echo -e "\n${CYAN}9. 安全性检查:${NC}"
+    check_security_status
+    
+    # 10. 性能建议
+    echo -e "\n${CYAN}10. 性能建议:${NC}"
     if [ "$rule_count" -gt 50 ]; then
         echo "⚠ 映射规则较多($rule_count条)，可能影响网络性能"
         echo "建议: 定期清理不用的规则，或考虑使用负载均衡"
@@ -2374,9 +2386,328 @@ diagnose_system() {
         echo "✓ 规则数量合理"
     fi
     
+    # 11. 故障排除建议
+    echo -e "\n${CYAN}11. 故障排除建议:${NC}"
+    provide_troubleshooting_suggestions
+    
     echo -e "\n${BLUE}=========================================${NC}"
     echo -e "${BLUE}        诊断完成${NC}"
     echo -e "${BLUE}=========================================${NC}"
+    
+    # 询问是否生成详细报告
+    read -p "是否生成详细诊断报告到文件? (y/n): " generate_report
+    if [[ "$generate_report" =~ ^[Yy]$ ]]; then
+        generate_diagnostic_report
+    fi
+}
+
+# 网络连通性测试
+test_network_connectivity() {
+    # 检查网络接口状态
+    echo "网络接口状态:"
+    if command -v ip &> /dev/null; then
+        local interfaces=$(ip link show | grep "state UP" | awk -F': ' '{print $2}' | head -3)
+        if [ -n "$interfaces" ]; then
+            echo "$interfaces" | while read -r interface; do
+                echo "✓ $interface: UP"
+            done
+        else
+            echo "✗ 未发现活跃的网络接口"
+        fi
+    else
+        echo "⚠ ip命令不可用，跳过接口检查"
+    fi
+    
+    # 测试本地回环
+    if ping -c 1 127.0.0.1 &> /dev/null; then
+        echo "✓ 本地回环: 正常"
+    else
+        echo "✗ 本地回环: 异常"
+    fi
+    
+    # 测试映射端口连通性
+    local service_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u | head -5))
+    if [ ${#service_ports[@]} -gt 0 ]; then
+        echo "端口连通性测试:"
+        for port in "${service_ports[@]}"; do
+            if timeout 2 bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null; then
+                echo "✓ 端口 $port: 可连接"
+            else
+                echo "✗ 端口 $port: 无法连接"
+            fi
+        done
+    fi
+}
+
+# 系统资源检查
+check_system_resources() {
+    # CPU使用率
+    if command -v top &> /dev/null; then
+        local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 2>/dev/null)
+        if [ -n "$cpu_usage" ]; then
+            echo "CPU使用率: ${cpu_usage}%"
+            if (( $(echo "$cpu_usage > 80" | bc -l 2>/dev/null || echo "0") )); then
+                echo "⚠ CPU使用率较高，可能影响网络性能"
+            fi
+        fi
+    fi
+    
+    # 内存使用情况
+    if [ -f /proc/meminfo ]; then
+        local mem_total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        local mem_available=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+        if [ -n "$mem_total" ] && [ -n "$mem_available" ]; then
+            local mem_used=$((mem_total - mem_available))
+            local mem_percent=$((mem_used * 100 / mem_total))
+            echo "内存使用率: ${mem_percent}% ($(format_bytes $((mem_used * 1024))))"
+            if [ "$mem_percent" -gt 90 ]; then
+                echo "⚠ 内存使用率过高，可能影响系统稳定性"
+            fi
+        fi
+    fi
+    
+    # 系统负载
+    if [ -f /proc/loadavg ]; then
+        local load_avg=$(cat /proc/loadavg | awk '{print $1}')
+        echo "系统负载 (1分钟): $load_avg"
+        local cpu_cores=$(nproc 2>/dev/null || echo "1")
+        if (( $(echo "$load_avg > $cpu_cores" | bc -l 2>/dev/null || echo "0") )); then
+            echo "⚠ 系统负载较高，可能影响响应速度"
+        fi
+    fi
+    
+    # 网络统计
+    if [ -f /proc/net/dev ]; then
+        echo "网络接口流量统计:"
+        awk 'NR>2 && $2>0 {printf "  %s: RX %s TX %s\n", $1, $2, $10}' /proc/net/dev | head -3
+    fi
+}
+
+# 安全性检查
+check_security_status() {
+    # 检查开放端口数量
+    local open_ports_count=0
+    if command -v ss &> /dev/null; then
+        open_ports_count=$(ss -tuln | grep -c "LISTEN")
+        echo "监听端口总数: $open_ports_count"
+        if [ "$open_ports_count" -gt 20 ]; then
+            echo "⚠ 开放端口较多，建议检查是否都是必需的"
+        fi
+    fi
+    
+    # 检查映射端口范围
+    local mapped_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | grep -o "dpts:[0-9]*:[0-9]*" | cut -d: -f2-3))
+    local high_risk_ports=0
+    for port_range in "${mapped_ports[@]}"; do
+        local start_port=$(echo "$port_range" | cut -d: -f1)
+        local end_port=$(echo "$port_range" | cut -d: -f2)
+        local range_size=$((end_port - start_port + 1))
+        if [ "$range_size" -gt 100 ]; then
+            ((high_risk_ports++))
+        fi
+    done
+    
+    if [ "$high_risk_ports" -gt 0 ]; then
+        echo "⚠ 发现 $high_risk_ports 个大范围端口映射，可能存在安全风险"
+        echo "建议: 尽量使用小范围或单端口映射"
+    else
+        echo "✓ 端口映射范围合理"
+    fi
+    
+    # 检查常见危险端口
+    local dangerous_ports=("22" "23" "3389" "5900" "1433" "3306")
+    local mapped_dangerous=()
+    for port in "${dangerous_ports[@]}"; do
+        if iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | grep -q "redir ports $port"; then
+            mapped_dangerous+=("$port")
+        fi
+    done
+    
+    if [ ${#mapped_dangerous[@]} -gt 0 ]; then
+        echo "⚠ 发现映射了敏感端口: ${mapped_dangerous[*]}"
+        echo "建议: 确保这些服务有足够的安全防护"
+    else
+        echo "✓ 未发现映射敏感端口"
+    fi
+}
+
+# 故障排除建议
+provide_troubleshooting_suggestions() {
+    local suggestions=()
+    
+    # 检查常见问题
+    if ! command -v iptables &> /dev/null; then
+        suggestions+=("安装iptables: $PACKAGE_MANAGER install iptables")
+    fi
+    
+    if ! lsmod | grep -q "iptable_nat"; then
+        suggestions+=("加载NAT模块: modprobe iptable_nat")
+    fi
+    
+    local rule_count=$(iptables -t nat -L PREROUTING -n | grep -c "$RULE_COMMENT")
+    if [ "$rule_count" -eq 0 ]; then
+        suggestions+=("当前无映射规则，使用选项1添加规则")
+    fi
+    
+    # 检查服务监听
+    local service_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u))
+    local unlistened_ports=()
+    for port in "${service_ports[@]}"; do
+        if ! ss -ulnp | grep -q ":$port "; then
+            unlistened_ports+=("$port")
+        fi
+    done
+    
+    if [ ${#unlistened_ports[@]} -gt 0 ]; then
+        suggestions+=("以下端口有映射但无服务监听: ${unlistened_ports[*]}")
+        suggestions+=("请启动相应服务或删除无用的映射规则")
+    fi
+    
+    # 输出建议
+    if [ ${#suggestions[@]} -gt 0 ]; then
+        for suggestion in "${suggestions[@]}"; do
+            echo "💡 $suggestion"
+        done
+    else
+        echo "✓ 未发现明显问题"
+    fi
+    
+    # 提供快速修复选项
+    if [ ${#suggestions[@]} -gt 0 ]; then
+        echo ""
+        read -p "是否尝试自动修复部分问题? (y/n): " auto_fix
+        if [[ "$auto_fix" =~ ^[Yy]$ ]]; then
+            attempt_auto_fix
+        fi
+    fi
+}
+
+# 自动修复尝试
+attempt_auto_fix() {
+    echo "正在尝试自动修复..."
+    
+    # 尝试加载必要的内核模块
+    local modules=("iptable_nat" "nf_nat" "nf_conntrack")
+    for module in "${modules[@]}"; do
+        if ! lsmod | grep -q "^$module"; then
+            echo "尝试加载模块: $module"
+            if modprobe "$module" 2>/dev/null; then
+                echo "✓ 成功加载 $module"
+            else
+                echo "✗ 无法加载 $module (可能需要root权限)"
+            fi
+        fi
+    done
+    
+    # 检查并启用IP转发
+    if [ -f /proc/sys/net/ipv4/ip_forward ]; then
+        local ip_forward=$(cat /proc/sys/net/ipv4/ip_forward)
+        if [ "$ip_forward" != "1" ]; then
+            echo "尝试启用IP转发..."
+            if echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null; then
+                echo "✓ 已启用IP转发"
+            else
+                echo "✗ 无法启用IP转发 (需要root权限)"
+                echo "手动执行: echo 1 > /proc/sys/net/ipv4/ip_forward"
+            fi
+        fi
+    fi
+    
+    echo "自动修复完成"
+}
+
+# 生成详细诊断报告
+generate_diagnostic_report() {
+    local report_file="$LOG_DIR/diagnostic_report_$(date +%Y%m%d_%H%M%S).txt"
+    register_temp_file "$report_file"
+    
+    echo "正在生成详细诊断报告..."
+    
+    {
+        echo "========================================="
+        echo "Port-Mapping-Manage 系统诊断报告"
+        echo "生成时间: $(date)"
+        echo "脚本版本: $SCRIPT_VERSION"
+        echo "========================================="
+        echo ""
+        
+        # 重新运行所有诊断检查并输出到文件
+        echo "1. 系统信息:"
+        echo "操作系统: $(uname -o)"
+        echo "内核版本: $(uname -r)"
+        echo "包管理器: $PACKAGE_MANAGER"
+        echo "持久化方法: $PERSISTENT_METHOD"
+        echo ""
+        
+        echo "2. 依赖检查:"
+        local deps=("iptables" "iptables-save" "ss" "netfilter-persistent")
+        for dep in "${deps[@]}"; do
+            if command -v "$dep" &> /dev/null; then
+                echo "✓ $dep: 已安装"
+            else
+                echo "✗ $dep: 未安装"
+            fi
+        done
+        echo ""
+        
+        echo "3. 内核模块检查:"
+        local modules=("iptable_nat" "nf_nat" "nf_conntrack")
+        for module in "${modules[@]}"; do
+            if lsmod | grep -q "^$module"; then
+                echo "✓ $module: 已加载"
+            else
+                echo "✗ $module: 未加载"
+            fi
+        done
+        echo ""
+        
+        echo "4. 当前映射规则:"
+        iptables -t nat -L PREROUTING -n --line-numbers | grep "$RULE_COMMENT" || echo "无映射规则"
+        echo ""
+        
+        echo "5. 系统资源状态:"
+        if [ -f /proc/loadavg ]; then
+            echo "系统负载: $(cat /proc/loadavg)"
+        fi
+        if [ -f /proc/meminfo ]; then
+            echo "内存信息:"
+            grep -E "MemTotal|MemFree|MemAvailable" /proc/meminfo
+        fi
+        echo ""
+        
+        echo "6. 网络接口状态:"
+        if command -v ip &> /dev/null; then
+            ip addr show | grep -E "^[0-9]+:|inet "
+        fi
+        echo ""
+        
+        echo "7. 监听端口:"
+        if command -v ss &> /dev/null; then
+            ss -tuln | head -20
+        fi
+        echo ""
+        
+        echo "========================================="
+        echo "报告生成完成"
+        echo "========================================="
+        
+    } > "$report_file"
+    
+    if [ -f "$report_file" ]; then
+        echo -e "${GREEN}✓ 诊断报告已生成: $report_file${NC}"
+        echo "报告大小: $(du -h "$report_file" | cut -f1)"
+        
+        read -p "是否查看报告内容? (y/n): " view_report
+        if [[ "$view_report" =~ ^[Yy]$ ]]; then
+            if command -v less &> /dev/null; then
+                less "$report_file"
+            else
+                cat "$report_file"
+            fi
+        fi
+    else
+        echo -e "${RED}✗ 报告生成失败${NC}"
+    fi
 }
 
 # 实时监控功能
