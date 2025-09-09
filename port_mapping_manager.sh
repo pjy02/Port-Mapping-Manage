@@ -2699,28 +2699,72 @@ generate_diagnostic_report() {
         
         read -p "是否查看报告内容? (y/n): " view_report
         if [[ "$view_report" =~ ^[Yy]$ ]]; then
+            echo -e "${CYAN}💡 提示: 查看报告时按 'q' 键退出，空格键翻页${NC}"
+            sleep 2
             if command -v less &> /dev/null; then
                 less "$report_file"
             else
+                echo -e "${YELLOW}使用 cat 显示报告内容 (按 Ctrl+C 可中断):${NC}"
                 cat "$report_file"
             fi
+            echo -e "${GREEN}报告查看完成，返回主菜单${NC}"
         fi
     else
         echo -e "${RED}✗ 报告生成失败${NC}"
     fi
 }
 
-# 实时监控功能
+# 增强的实时监控功能
 monitor_traffic() {
-    echo -e "${BLUE}开始实时监控 (按Ctrl+C退出)${NC}"
-    echo -e "${CYAN}时间\t\t数据包\t字节数\t速率${NC}"
+    echo -e "${BLUE}=========================================${NC}"
+    echo -e "${BLUE}        实时流量监控${NC}"
+    echo -e "${BLUE}=========================================${NC}"
+    
+    # 监控选项菜单
+    echo -e "${CYAN}监控模式选择:${NC}"
+    echo "1. 简单模式 - 总体流量统计"
+    echo "2. 详细模式 - 按端口分组统计"
+    echo "3. 连接模式 - 活跃连接监控"
+    echo "4. 性能模式 - 系统资源监控"
+    echo "5. 返回主菜单"
+    
+    read -p "请选择监控模式 [1-5]: " monitor_mode
+    
+    case $monitor_mode in
+        1) monitor_simple ;;
+        2) monitor_detailed ;;
+        3) monitor_connections ;;
+        4) monitor_performance ;;
+        5) return ;;
+        *) echo -e "${RED}无效选择${NC}"; return ;;
+    esac
+}
+
+# 简单模式监控
+monitor_simple() {
+    echo -e "${BLUE}简单模式监控 (按Ctrl+C退出)${NC}"
+    echo -e "${CYAN}时间\t\t数据包\t字节数\t\t速率\t\t连接数${NC}"
+    echo "--------------------------------------------------------------------"
     
     local prev_packets=0
     local prev_bytes=0
+    local iptables_cmd=$(get_iptables_cmd)
+    
+    # 设置陷阱处理Ctrl+C
+    trap 'echo -e "\n${GREEN}监控已停止${NC}"; return' INT
     
     while true; do
         local current_packets=0
         local current_bytes=0
+        local connection_count=0
+        
+        # 获取流量统计（优化：减少iptables调用）
+        local stats_output
+        if ! stats_output=$($iptables_cmd -t nat -L PREROUTING -v -n 2>/dev/null); then
+            echo -e "${RED}获取统计数据失败${NC}"
+            sleep 1
+            continue
+        fi
         
         # 统计当前流量
         while read -r line; do
@@ -2732,23 +2776,186 @@ monitor_traffic() {
                     current_bytes=$((current_bytes + bytes))
                 fi
             fi
-        done < <(iptables -t nat -L PREROUTING -v -n)
+        done <<< "$stats_output"
+        
+        # 获取连接数
+        if command -v ss &> /dev/null; then
+            connection_count=$(ss -tuln | grep -c "LISTEN" 2>/dev/null || echo "0")
+        fi
         
         # 计算速率
         local packet_rate=$((current_packets - prev_packets))
         local byte_rate=$((current_bytes - prev_bytes))
         
-        printf "%s\t%d\t%s\t%s/s\n" \
+        # 显示统计信息
+        printf "%s\t%8d\t%12s\t%10s/s\t%6d\n" \
             "$(date '+%H:%M:%S')" \
             "$current_packets" \
             "$(format_bytes $current_bytes)" \
-            "$(format_bytes $byte_rate)"
+            "$(format_bytes $byte_rate)" \
+            "$connection_count"
         
         prev_packets=$current_packets
         prev_bytes=$current_bytes
         
         sleep 1
     done
+    
+    trap - INT
+}
+
+# 详细模式监控
+monitor_detailed() {
+    echo -e "${BLUE}详细模式监控 (按Ctrl+C退出)${NC}"
+    echo -e "${CYAN}按端口分组的流量统计:${NC}"
+    echo "--------------------------------------------------------------------"
+    
+    local iptables_cmd=$(get_iptables_cmd)
+    trap 'echo -e "\n${GREEN}监控已停止${NC}"; return' INT
+    
+    while true; do
+        clear
+        echo -e "${BLUE}详细流量监控 - $(date)${NC}"
+        echo "--------------------------------------------------------------------"
+        printf "%-10s %-15s %-12s %-12s %-10s\n" "端口" "协议" "数据包" "字节数" "状态"
+        echo "--------------------------------------------------------------------"
+        
+        # 获取详细规则信息
+        local rules_output
+        if ! rules_output=$($iptables_cmd -t nat -L PREROUTING -v -n --line-numbers 2>/dev/null); then
+            echo -e "${RED}获取规则信息失败${NC}"
+            sleep 2
+            continue
+        fi
+        
+        # 解析每个规则的统计信息
+        while read -r line; do
+            if echo "$line" | grep -q "$RULE_COMMENT"; then
+                local packets=$(echo "$line" | awk '{print $2}' | tr -d '[]')
+                local bytes=$(echo "$line" | awk '{print $3}' | tr -d '[]')
+                local protocol=$(echo "$line" | awk '{print $4}')
+                local port_info=$(echo "$line" | grep -o "dpts:[0-9]*:[0-9]*\|dpt:[0-9]*" | head -1)
+                
+                if [[ "$packets" =~ ^[0-9]+$ ]] && [[ "$bytes" =~ ^[0-9]+$ ]]; then
+                    local port_display="$port_info"
+                    local status="活跃"
+                    if [ "$packets" -eq 0 ]; then
+                        status="空闲"
+                    fi
+                    
+                    printf "%-10s %-15s %-12s %-12s %-10s\n" \
+                        "$port_display" \
+                        "$protocol" \
+                        "$packets" \
+                        "$(format_bytes $bytes)" \
+                        "$status"
+                fi
+            fi
+        done <<< "$rules_output"
+        
+        echo "--------------------------------------------------------------------"
+        echo -e "${CYAN}按 Ctrl+C 退出监控${NC}"
+        sleep 2
+    done
+    
+    trap - INT
+}
+
+# 连接模式监控
+monitor_connections() {
+    echo -e "${BLUE}连接监控模式 (按Ctrl+C退出)${NC}"
+    
+    if ! command -v ss &> /dev/null; then
+        echo -e "${RED}错误: ss 命令不可用，无法监控连接${NC}"
+        return 1
+    fi
+    
+    trap 'echo -e "\n${GREEN}监控已停止${NC}"; return' INT
+    
+    while true; do
+        clear
+        echo -e "${BLUE}活跃连接监控 - $(date)${NC}"
+        echo "--------------------------------------------------------------------"
+        
+        # 显示监听端口
+        echo -e "${CYAN}监听端口:${NC}"
+        ss -tuln | grep "LISTEN" | head -10
+        
+        echo ""
+        echo -e "${CYAN}活跃连接 (前10个):${NC}"
+        ss -tun | grep "ESTAB" | head -10
+        
+        echo ""
+        echo -e "${CYAN}连接统计:${NC}"
+        local listen_count=$(ss -tuln | grep -c "LISTEN" 2>/dev/null || echo "0")
+        local estab_count=$(ss -tun | grep -c "ESTAB" 2>/dev/null || echo "0")
+        local total_count=$(ss -tun | wc -l 2>/dev/null || echo "0")
+        
+        echo "监听端口: $listen_count"
+        echo "已建立连接: $estab_count"
+        echo "总连接数: $total_count"
+        
+        echo "--------------------------------------------------------------------"
+        echo -e "${CYAN}按 Ctrl+C 退出监控${NC}"
+        sleep 3
+    done
+    
+    trap - INT
+}
+
+# 性能模式监控
+monitor_performance() {
+    echo -e "${BLUE}性能监控模式 (按Ctrl+C退出)${NC}"
+    
+    trap 'echo -e "\n${GREEN}监控已停止${NC}"; return' INT
+    
+    while true; do
+        clear
+        echo -e "${BLUE}系统性能监控 - $(date)${NC}"
+        echo "======================================================================"
+        
+        # CPU使用率
+        if command -v top &> /dev/null; then
+            echo -e "${CYAN}CPU使用率:${NC}"
+            top -bn1 | grep "Cpu(s)" | head -1
+        fi
+        
+        # 内存使用情况
+        if [ -f /proc/meminfo ]; then
+            echo -e "${CYAN}内存使用:${NC}"
+            local mem_total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+            local mem_available=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+            if [ -n "$mem_total" ] && [ -n "$mem_available" ]; then
+                local mem_used=$((mem_total - mem_available))
+                local mem_percent=$((mem_used * 100 / mem_total))
+                echo "总内存: $(format_bytes $((mem_total * 1024)))"
+                echo "已使用: $(format_bytes $((mem_used * 1024))) (${mem_percent}%)"
+                echo "可用: $(format_bytes $((mem_available * 1024)))"
+            fi
+        fi
+        
+        # 系统负载
+        if [ -f /proc/loadavg ]; then
+            echo -e "${CYAN}系统负载:${NC}"
+            cat /proc/loadavg
+        fi
+        
+        # 网络接口统计
+        echo -e "${CYAN}网络接口流量:${NC}"
+        if [ -f /proc/net/dev ]; then
+            awk 'NR>2 && $2>0 {printf "%-10s RX: %10s TX: %10s\n", $1, $2, $10}' /proc/net/dev | head -5
+        fi
+        
+        # iptables规则数量
+        local rule_count=$(iptables -t nat -L PREROUTING -n | grep -c "$RULE_COMMENT" 2>/dev/null || echo "0")
+        echo -e "${CYAN}映射规则数量:${NC} $rule_count"
+        
+        echo "======================================================================"
+        echo -e "${CYAN}按 Ctrl+C 退出监控${NC}"
+        sleep 2
+    done
+    
+    trap - INT
 }
 
 # --- 新增功能：规则管理 ---
