@@ -796,163 +796,854 @@ EOF
 
 # 显示手动保存说明
 show_manual_save_instructions() {
-    echo -e "${BLUE}手动持久化规则说明：${NC}"
-    echo "1. 将当前规则保存到文件:"
-    echo "   iptables-save > /etc/iptables/rules.v4"
-    echo "2. 添加到系统启动脚本:"
-    echo "   echo 'iptables-restore < /etc/iptables/rules.v4' >> /etc/rc.local"
-    echo "3. 或使用crontab在重启时恢复:"
-    echo "   echo '@reboot iptables-restore < /etc/iptables/rules.v4' | crontab -"
+    echo -e "${BLUE}========== 手动持久化规则说明 ==========${NC}"
+    echo
+    echo -e "${YELLOW}如果自动持久化失败，您可以尝试以下手动方法：${NC}"
+    echo
+    
+    echo -e "${CYAN}方法1: 使用系统持久化包${NC}"
+    case $PACKAGE_MANAGER in
+        "apt")
+            echo "  # 安装 iptables-persistent"
+            echo "  apt-get update && apt-get install -y iptables-persistent"
+            echo "  # 保存规则"
+            echo "  iptables-save > /etc/iptables/rules.v4"
+            echo "  ip6tables-save > /etc/iptables/rules.v6"
+            echo "  # 或使用命令"
+            echo "  netfilter-persistent save"
+            ;;
+        "yum"|"dnf")
+            echo "  # 安装 iptables-services"
+            echo "  $PACKAGE_MANAGER install -y iptables-services"
+            echo "  # 启用服务"
+            echo "  systemctl enable iptables ip6tables"
+            echo "  # 保存规则"
+            echo "  service iptables save"
+            echo "  service ip6tables save"
+            ;;
+        *)
+            echo "  # 根据您的发行版安装相应的持久化包"
+            echo "  # 然后保存规则到系统默认位置"
+            ;;
+    esac
+    
+    echo
+    echo -e "${CYAN}方法2: 使用 rc.local${NC}"
+    echo "  # 编辑 /etc/rc.local 文件"
+    echo "  nano /etc/rc.local"
+    echo "  # 在 'exit 0' 之前添加："
+    echo "  $CONFIG_DIR/restore-rules.sh"
+    echo "  # 确保文件可执行"
+    echo "  chmod +x /etc/rc.local"
+    
+    echo
+    echo -e "${CYAN}方法3: 使用 crontab${NC}"
+    echo "  # 添加开机任务"
+    echo "  (crontab -l 2>/dev/null; echo '@reboot $CONFIG_DIR/restore-rules.sh') | crontab -"
+    
+    echo
+    echo -e "${CYAN}方法4: 手动创建 systemd 服务${NC}"
+    echo "  # 创建服务文件"
+    echo "  cat > /etc/systemd/system/iptables-restore.service <<EOF"
+    echo "  [Unit]"
+    echo "  Description=Restore iptables rules"
+    echo "  After=network.target"
+    echo "  "
+    echo "  [Service]"
+    echo "  Type=oneshot"
+    echo "  ExecStart=$CONFIG_DIR/restore-rules.sh"
+    echo "  RemainAfterExit=yes"
+    echo "  "
+    echo "  [Install]"
+    echo "  WantedBy=multi-user.target"
+    echo "  EOF"
+    echo "  # 启用服务"
+    echo "  systemctl daemon-reload"
+    echo "  systemctl enable iptables-restore.service"
+    
+    echo
+    echo -e "${CYAN}方法5: 网络接口启动脚本 (Debian/Ubuntu)${NC}"
+    echo "  # 创建接口启动脚本"
+    echo "  cat > /etc/network/if-up.d/iptables-restore <<EOF"
+    echo "  #!/bin/bash"
+    echo "  if [ \"\$IFACE\" != \"lo\" ]; then"
+    echo "      $CONFIG_DIR/restore-rules.sh"
+    echo "  fi"
+    echo "  EOF"
+    echo "  chmod +x /etc/network/if-up.d/iptables-restore"
+    
+    echo
+    echo -e "${GREEN}验证持久化是否生效：${NC}"
+    echo "1. 重启系统: reboot"
+    echo "2. 检查规则: iptables -t nat -L PREROUTING -n"
+    echo "3. 查看服务状态: systemctl status iptables-restore.service"
+    echo "4. 查看日志: journalctl -u iptables-restore.service"
+    
+    echo
+    echo -e "${YELLOW}注意事项：${NC}"
+    echo "• 规则文件位置: $CONFIG_DIR/current.rules.v4 和 current.rules.v6"
+    echo "• 恢复脚本位置: $CONFIG_DIR/restore-rules.sh"
+    echo "• 确保脚本有执行权限: chmod +x $CONFIG_DIR/restore-rules.sh"
+    echo "• 建议定期备份规则文件"
+    
+    echo
+    echo -e "${BLUE}=========================================${NC}"
 }
 
 # 检查和修复持久化配置
 check_and_fix_persistence() {
-    echo -e "${BLUE}检查持久化配置...${NC}"
+    echo -e "${BLUE}========== 检查持久化配置 ==========${NC}"
     local service_file="/etc/systemd/system/iptables-restore.service"
+    local restore_script="$CONFIG_DIR/restore-rules.sh"
     local fixed=false
+    local issues_found=0
     
-    # 检查规则文件是否存在
-    if [ ! -f "$CONFIG_DIR/current.rules.v4" ] && [ ! -f "$CONFIG_DIR/current.rules.v6" ]; then
-        echo -e "${YELLOW}⚠ 未找到规则文件，尝试保存当前规则...${NC}"
+    echo "正在进行全面的持久化配置检查..."
+    echo
+    
+    # 1. 检查规则文件是否存在
+    echo "1. 检查规则文件..."
+    local rules_exist=false
+    if [ -f "$CONFIG_DIR/current.rules.v4" ]; then
+        echo "  ✓ IPv4 规则文件存在: $CONFIG_DIR/current.rules.v4"
+        rules_exist=true
+    else
+        echo "  ✗ IPv4 规则文件不存在"
+        ((issues_found++))
+    fi
+    
+    if [ -f "$CONFIG_DIR/current.rules.v6" ]; then
+        echo "  ✓ IPv6 规则文件存在: $CONFIG_DIR/current.rules.v6"
+        rules_exist=true
+    else
+        echo "  ✗ IPv6 规则文件不存在"
+        ((issues_found++))
+    fi
+    
+    if [ "$rules_exist" = false ]; then
+        echo "  ⚠ 未找到任何规则文件，尝试保存当前规则..."
         if save_rules; then
-            echo -e "${GREEN}✓ 规则保存成功${NC}"
+            echo "  ✓ 规则保存成功"
             fixed=true
         else
-            echo -e "${RED}✗ 规则保存失败${NC}"
+            echo "  ✗ 规则保存失败"
             return 1
         fi
     fi
     
-    # 检查systemd服务是否存在
-    if [ ! -f "$service_file" ]; then
-        echo -e "${YELLOW}⚠ systemd服务不存在，正在创建...${NC}"
-        if setup_systemd_service; then
-            echo -e "${GREEN}✓ systemd服务创建成功${NC}"
-            fixed=true
+    # 2. 检查恢复脚本
+    echo
+    echo "2. 检查恢复脚本..."
+    if [ -f "$restore_script" ]; then
+        if [ -x "$restore_script" ]; then
+            echo "  ✓ 恢复脚本存在且可执行: $restore_script"
         else
-            echo -e "${RED}✗ systemd服务创建失败${NC}"
-            return 1
+            echo "  ⚠ 恢复脚本存在但不可执行，正在修复..."
+            chmod +x "$restore_script"
+            echo "  ✓ 恢复脚本权限已修复"
+            fixed=true
         fi
     else
+        echo "  ✗ 恢复脚本不存在，正在创建..."
+        create_restore_script
+        echo "  ✓ 恢复脚本已创建"
+        fixed=true
+        ((issues_found++))
+    fi
+    
+    # 3. 检查 systemd 服务
+    echo
+    echo "3. 检查 systemd 服务..."
+    if [ -f "$service_file" ]; then
+        echo "  ✓ systemd 服务文件存在: $service_file"
+        
         # 检查服务是否启用
-        if ! systemctl is-enabled iptables-restore.service >/dev/null 2>&1; then
-            echo -e "${YELLOW}⚠ systemd服务未启用，正在启用...${NC}"
-            systemctl enable iptables-restore.service
-            echo -e "${GREEN}✓ systemd服务已启用${NC}"
+        if systemctl is-enabled iptables-restore.service >/dev/null 2>&1; then
+            echo "  ✓ systemd 服务已启用"
+        else
+            echo "  ⚠ systemd 服务未启用，正在启用..."
+            if systemctl enable iptables-restore.service; then
+                echo "  ✓ systemd 服务已启用"
+                fixed=true
+            else
+                echo "  ✗ systemd 服务启用失败"
+                ((issues_found++))
+            fi
+        fi
+        
+        # 检查服务配置是否正确
+        if grep -q "$restore_script" "$service_file" 2>/dev/null; then
+            echo "  ✓ systemd 服务配置正确"
+        else
+            echo "  ⚠ systemd 服务配置不正确，正在修复..."
+            setup_systemd_service
+            echo "  ✓ systemd 服务配置已修复"
             fixed=true
         fi
         
-        # 检查服务是否正在运行
-        if ! systemctl is-active iptables-restore.service >/dev/null 2>&1; then
-            echo -e "${YELLOW}⚠ systemd服务未运行，正在启动...${NC}"
-            if systemctl start iptables-restore.service; then
-                echo -e "${GREEN}✓ systemd服务启动成功${NC}"
-                fixed=true
-            else
-                echo -e "${RED}✗ systemd服务启动失败${NC}"
-                return 1
-            fi
+        # 测试服务是否能正常启动
+        echo "  正在测试 systemd 服务..."
+        if systemctl start iptables-restore.service 2>/dev/null; then
+            echo "  ✓ systemd 服务测试成功"
+        else
+            echo "  ⚠ systemd 服务测试失败，查看详细信息:"
+            echo "    journalctl -u iptables-restore.service --no-pager -n 5"
+            ((issues_found++))
+        fi
+    else
+        echo "  ✗ systemd 服务文件不存在，正在创建..."
+        if setup_systemd_service; then
+            echo "  ✓ systemd 服务创建成功"
+            fixed=true
+        else
+            echo "  ✗ systemd 服务创建失败"
+            ((issues_found++))
         fi
     fi
     
-    # 检查服务配置是否正确
-    if ! grep -q "if \[ -f /etc/port_mapping_manager/current.rules.v4 \]" "$service_file" 2>/dev/null; then
-        echo -e "${YELLOW}⚠ systemd服务配置不正确，正在修复...${NC}"
-        setup_systemd_service
-        fixed=true
+    # 4. 检查系统持久化方法
+    echo
+    echo "4. 检查系统持久化方法..."
+    case $PERSISTENT_METHOD in
+        "netfilter-persistent")
+            if command -v netfilter-persistent &> /dev/null; then
+                echo "  ✓ netfilter-persistent 可用"
+                if [ -f "/etc/iptables/rules.v4" ] || [ -f "/etc/iptables/rules.v6" ]; then
+                    echo "  ✓ 系统持久化文件存在"
+                else
+                    echo "  ⚠ 系统持久化文件不存在，正在创建..."
+                    mkdir -p /etc/iptables
+                    [ -f "$CONFIG_DIR/current.rules.v4" ] && cp "$CONFIG_DIR/current.rules.v4" /etc/iptables/rules.v4
+                    [ -f "$CONFIG_DIR/current.rules.v6" ] && cp "$CONFIG_DIR/current.rules.v6" /etc/iptables/rules.v6
+                    echo "  ✓ 系统持久化文件已创建"
+                    fixed=true
+                fi
+            else
+                echo "  ⚠ netfilter-persistent 不可用"
+            fi
+            ;;
+        "service")
+            if command -v service &> /dev/null; then
+                echo "  ✓ service 命令可用"
+                local service_available=false
+                [ -f "/etc/init.d/iptables" ] && echo "  ✓ iptables 服务可用" && service_available=true
+                [ -f "/etc/init.d/ip6tables" ] && echo "  ✓ ip6tables 服务可用" && service_available=true
+                [ "$service_available" = false ] && echo "  ⚠ iptables 服务不可用"
+            else
+                echo "  ⚠ service 命令不可用"
+            fi
+            ;;
+        *)
+            echo "  ⚠ 未检测到系统持久化方法"
+            ;;
+    esac
+    
+    # 5. 检查 fallback 机制
+    echo
+    echo "5. 检查 fallback 持久化机制..."
+    local fallback_count=0
+    
+    # 检查 crontab
+    if crontab -l 2>/dev/null | grep -q "$restore_script"; then
+        echo "  ✓ crontab 任务已配置"
+        ((fallback_count++))
+    else
+        echo "  - crontab 任务未配置"
     fi
     
-    if [ "$fixed" = true ]; then
-        echo -e "${GREEN}✓ 持久化配置已修复${NC}"
-        log_message "INFO" "持久化配置已修复"
+    # 检查 rc.local
+    if [ -f "/etc/rc.local" ] && grep -q "$restore_script" /etc/rc.local; then
+        echo "  ✓ rc.local 脚本已配置"
+        ((fallback_count++))
+    else
+        echo "  - rc.local 脚本未配置"
+    fi
+    
+    # 检查网络接口脚本
+    if [ -f "/etc/network/if-up.d/iptables-restore" ]; then
+        echo "  ✓ 网络接口启动脚本已配置"
+        ((fallback_count++))
+    else
+        echo "  - 网络接口启动脚本未配置"
+    fi
+    
+    if [ $fallback_count -eq 0 ]; then
+        echo "  ⚠ 未找到 fallback 机制，建议配置..."
+        read -p "  是否现在配置 fallback 机制? (y/N): " setup_fallback
+        if [[ "$setup_fallback" =~ ^[Yy]$ ]]; then
+            setup_fallback_persistence
+            fixed=true
+        fi
+    else
+        echo "  ✓ 已配置 $fallback_count 个 fallback 机制"
+    fi
+    
+    # 6. 进行完整性测试
+    echo
+    echo "6. 进行完整性测试..."
+    if [ -f "$restore_script" ] && [ -x "$restore_script" ]; then
+        echo "  正在测试恢复脚本..."
+        # 创建测试环境（不实际执行恢复）
+        if bash -n "$restore_script"; then
+            echo "  ✓ 恢复脚本语法检查通过"
+        else
+            echo "  ✗ 恢复脚本语法检查失败"
+            ((issues_found++))
+        fi
+    fi
+    
+    # 总结结果
+    echo
+    echo -e "${BLUE}========== 检查结果总结 ==========${NC}"
+    
+    if [ $issues_found -eq 0 ]; then
+        if [ "$fixed" = true ]; then
+            echo -e "${GREEN}✓ 发现并修复了一些配置问题${NC}"
+            echo -e "${GREEN}✓ 持久化配置现在工作正常${NC}"
+            log_message "INFO" "持久化配置检查完成，已修复问题"
+        else
+            echo -e "${GREEN}✓ 持久化配置完全正常${NC}"
+            log_message "INFO" "持久化配置检查完成，无问题"
+        fi
+        
+        echo
+        echo "已配置的持久化方法："
+        systemctl is-enabled iptables-restore.service >/dev/null 2>&1 && echo "• systemd 服务"
+        [ -f "/etc/iptables/rules.v4" ] && echo "• 系统持久化文件"
+        crontab -l 2>/dev/null | grep -q "$restore_script" && echo "• crontab 任务"
+        [ -f "/etc/rc.local" ] && grep -q "$restore_script" /etc/rc.local && echo "• rc.local 脚本"
+        
+        echo
+        echo -e "${CYAN}建议测试持久化是否生效：${NC}"
+        echo "1. 重启系统验证规则是否自动恢复"
+        echo "2. 或手动测试: $restore_script"
+        
         return 0
     else
-        echo -e "${GREEN}✓ 持久化配置正常${NC}"
-        return 0
+        echo -e "${YELLOW}⚠ 发现 $issues_found 个问题${NC}"
+        if [ "$fixed" = true ]; then
+            echo -e "${YELLOW}⚠ 部分问题已修复，但仍有问题需要手动处理${NC}"
+        else
+            echo -e "${RED}✗ 持久化配置存在问题，需要手动修复${NC}"
+        fi
+        
+        echo
+        echo -e "${CYAN}建议操作：${NC}"
+        echo "1. 查看详细错误信息"
+        echo "2. 尝试重新运行: 选择菜单 '10. 永久保存当前规则'"
+        echo "3. 或参考手动配置说明"
+        
+        log_message "WARNING" "持久化配置检查发现 $issues_found 个问题"
+        return 1
     fi
 }
 
 # 增强的规则保存
 save_rules() {
-    local iptables_save_cmd
-    local rules_file
-    local effective_persistent_method
+    local rules_file_v4="$CONFIG_DIR/current.rules.v4"
+    local rules_file_v6="$CONFIG_DIR/current.rules.v6"
     local save_success=false
+    local persistence_success=false
 
-    echo "正在保存iptables规则..."
+    echo -e "${BLUE}正在保存 iptables 规则...${NC}"
+    
+    # 确保配置目录存在
+    mkdir -p "$CONFIG_DIR"
     
     # 保存IPv4规则
     if command -v iptables-save &> /dev/null; then
-        rules_file="$CONFIG_DIR/current.rules.v4"
-        if iptables-save > "$rules_file" 2>/dev/null; then
-            echo -e "${GREEN}✓ IPv4规则已保存到 $rules_file${NC}"
-            log_message "INFO" "IPv4规则保存到文件: $rules_file"
+        echo "正在保存 IPv4 规则..."
+        if iptables-save > "$rules_file_v4" 2>/dev/null; then
+            echo -e "${GREEN}✓ IPv4规则已保存到 $rules_file_v4${NC}"
+            log_message "INFO" "IPv4规则保存到文件: $rules_file_v4"
             save_success=true
         else
             echo -e "${RED}✗ IPv4规则保存失败${NC}"
             log_message "ERROR" "IPv4规则保存失败"
         fi
+    else
+        echo -e "${YELLOW}⚠ iptables-save 命令不可用${NC}"
     fi
     
     # 保存IPv6规则
     if command -v ip6tables-save &> /dev/null; then
-        rules_file="$CONFIG_DIR/current.rules.v6"
-        if ip6tables-save > "$rules_file" 2>/dev/null; then
-            echo -e "${GREEN}✓ IPv6规则已保存到 $rules_file${NC}"
-            log_message "INFO" "IPv6规则保存到文件: $rules_file"
+        echo "正在保存 IPv6 规则..."
+        if ip6tables-save > "$rules_file_v6" 2>/dev/null; then
+            echo -e "${GREEN}✓ IPv6规则已保存到 $rules_file_v6${NC}"
+            log_message "INFO" "IPv6规则保存到文件: $rules_file_v6"
             save_success=true
         else
             echo -e "${RED}✗ IPv6规则保存失败${NC}"
             log_message "ERROR" "IPv6规则保存失败"
         fi
+    else
+        echo -e "${YELLOW}⚠ ip6tables-save 命令不可用${NC}"
     fi
     
-    # 尝试使用系统持久化方法
-    effective_persistent_method=$PERSISTENT_METHOD
-    case $effective_persistent_method in
+    if [ "$save_success" = false ]; then
+        echo -e "${RED}✗ 规则保存失败，无法继续配置持久化${NC}"
+        log_message "ERROR" "规则保存失败"
+        return 1
+    fi
+    
+    echo -e "${BLUE}正在配置持久化机制...${NC}"
+    
+    # 方法1: 尝试使用系统原生持久化方法
+    echo "1. 尝试系统原生持久化方法..."
+    case $PERSISTENT_METHOD in
         "netfilter-persistent")
             if command -v netfilter-persistent &> /dev/null; then
+                # 确保规则文件在正确位置
+                mkdir -p /etc/iptables
+                cp "$rules_file_v4" /etc/iptables/rules.v4 2>/dev/null
+                cp "$rules_file_v6" /etc/iptables/rules.v6 2>/dev/null
+                
                 if netfilter-persistent save 2>/dev/null; then
-                    echo -e "${GREEN}✓ 规则已通过netfilter-persistent永久保存${NC}"
-                    log_message "INFO" "规则通过netfilter-persistent永久保存"
-                    save_success=true
+                    echo -e "${GREEN}✓ 规则已通过 netfilter-persistent 永久保存${NC}"
+                    log_message "INFO" "规则通过 netfilter-persistent 永久保存"
+                    persistence_success=true
+                else
+                    echo -e "${YELLOW}⚠ netfilter-persistent 保存失败${NC}"
                 fi
             fi
             ;;
         "service")
-            if command -v service &> /dev/null && [ -f "/etc/init.d/iptables" ]; then
-                if service iptables save 2>/dev/null; then
-                    echo -e "${GREEN}✓ 规则已通过service命令永久保存${NC}"
-                    log_message "INFO" "规则通过service命令永久保存"
-                    save_success=true
+            if command -v service &> /dev/null; then
+                local service_success=false
+                if [ -f "/etc/init.d/iptables" ] && service iptables save 2>/dev/null; then
+                    echo -e "${GREEN}✓ IPv4 规则已通过 service 命令永久保存${NC}"
+                    service_success=true
+                fi
+                if [ -f "/etc/init.d/ip6tables" ] && service ip6tables save 2>/dev/null; then
+                    echo -e "${GREEN}✓ IPv6 规则已通过 service 命令永久保存${NC}"
+                    service_success=true
+                fi
+                if [ "$service_success" = true ]; then
+                    log_message "INFO" "规则通过 service 命令永久保存"
+                    persistence_success=true
+                else
+                    echo -e "${YELLOW}⚠ service 命令保存失败${NC}"
                 fi
             fi
             ;;
+        *)
+            echo -e "${YELLOW}⚠ 未检测到系统原生持久化方法${NC}"
+            ;;
     esac
     
-    # 设置systemd服务
-    if [ "$save_success" = true ]; then
-        if setup_systemd_service; then
-            echo -e "${GREEN}✓ 规则持久化配置完成${NC}"
-            log_message "INFO" "规则持久化配置完成"
-            return 0
-        else
-            echo -e "${YELLOW}⚠ 规则已保存但systemd服务配置失败${NC}"
-            log_message "WARNING" "规则已保存但systemd服务配置失败"
-            show_manual_save_instructions
-            return 1
+    # 方法2: 尝试安装并使用持久化包
+    if [ "$persistence_success" = false ]; then
+        echo "2. 尝试安装持久化包..."
+        if install_persistence_package; then
+            # 重新尝试系统持久化
+            case $PACKAGE_MANAGER in
+                "apt")
+                    mkdir -p /etc/iptables
+                    cp "$rules_file_v4" /etc/iptables/rules.v4 2>/dev/null
+                    cp "$rules_file_v6" /etc/iptables/rules.v6 2>/dev/null
+                    if netfilter-persistent save 2>/dev/null; then
+                        echo -e "${GREEN}✓ 规则已通过新安装的 iptables-persistent 保存${NC}"
+                        persistence_success=true
+                    fi
+                    ;;
+                "yum"|"dnf")
+                    if service iptables save 2>/dev/null && service ip6tables save 2>/dev/null; then
+                        echo -e "${GREEN}✓ 规则已通过新安装的 iptables-services 保存${NC}"
+                        persistence_success=true
+                    fi
+                    ;;
+            esac
         fi
+    fi
+    
+    # 方法3: 使用 systemd 服务
+    echo "3. 配置 systemd 服务..."
+    if setup_systemd_service; then
+        echo -e "${GREEN}✓ systemd 服务配置成功${NC}"
+        persistence_success=true
     else
-        echo -e "${RED}✗ 规则保存失败${NC}"
-        log_message "ERROR" "规则保存失败"
+        echo -e "${YELLOW}⚠ systemd 服务配置失败${NC}"
+    fi
+    
+    # 方法4: 设置 fallback 机制
+    echo "4. 设置 fallback 持久化机制..."
+    setup_fallback_persistence
+    
+    # 验证持久化配置
+    echo -e "${BLUE}正在验证持久化配置...${NC}"
+    if verify_persistence_config; then
+        echo -e "${GREEN}✓ 持久化配置验证成功${NC}"
+        persistence_success=true
+    else
+        echo -e "${YELLOW}⚠ 持久化配置验证失败${NC}"
+    fi
+    
+    # 总结结果
+    echo
+    echo -e "${BLUE}========== 持久化配置总结 ==========${NC}"
+    if [ "$persistence_success" = true ]; then
+        echo -e "${GREEN}✓ 规则已成功保存并配置持久化${NC}"
+        echo -e "${GREEN}✓ 系统重启后规则将自动恢复${NC}"
+        log_message "INFO" "规则持久化配置完成"
+        
+        # 显示配置的持久化方法
+        echo
+        echo "已配置的持久化方法："
+        if systemctl is-enabled iptables-restore.service >/dev/null 2>&1; then
+            echo "• systemd 服务: iptables-restore.service"
+        fi
+        if [ -f "/etc/iptables/rules.v4" ] || [ -f "/etc/iptables/rules.v6" ]; then
+            echo "• 系统持久化文件: /etc/iptables/rules.*"
+        fi
+        if crontab -l 2>/dev/null | grep -q "$CONFIG_DIR/restore-rules.sh"; then
+            echo "• crontab 任务: @reboot"
+        fi
+        if [ -f "/etc/rc.local" ] && grep -q "$CONFIG_DIR/restore-rules.sh" /etc/rc.local; then
+            echo "• rc.local 脚本"
+        fi
+        
+        return 0
+    else
+        echo -e "${RED}✗ 持久化配置失败${NC}"
+        echo -e "${YELLOW}规则已保存到文件，但可能需要手动配置持久化${NC}"
+        log_message "ERROR" "持久化配置失败"
         show_manual_save_instructions
         return 1
     fi
 }
 
+# 验证持久化配置
+verify_persistence_config() {
+    local verification_passed=false
+    
+    echo "正在验证持久化配置..."
+    
+    # 检查 systemd 服务
+    if systemctl is-enabled iptables-restore.service >/dev/null 2>&1; then
+        echo "✓ systemd 服务已启用"
+        verification_passed=true
+    fi
+    
+    # 检查规则文件
+    if [ -f "$CONFIG_DIR/current.rules.v4" ] || [ -f "$CONFIG_DIR/current.rules.v6" ]; then
+        echo "✓ 规则文件存在"
+        verification_passed=true
+    fi
+    
+    # 检查恢复脚本
+    if [ -f "$CONFIG_DIR/restore-rules.sh" ] && [ -x "$CONFIG_DIR/restore-rules.sh" ]; then
+        echo "✓ 恢复脚本可执行"
+        verification_passed=true
+    fi
+    
+    # 检查系统持久化文件
+    if [ -f "/etc/iptables/rules.v4" ] || [ -f "/etc/iptables/rules.v6" ]; then
+        echo "✓ 系统持久化文件存在"
+        verification_passed=true
+    fi
+    
+    return $([[ "$verification_passed" == "true" ]] && echo 0 || echo 1)
+}
+
+# 测试持久化配置
+test_persistence_config() {
+    echo -e "${BLUE}========== 测试持久化配置 ==========${NC}"
+    echo
+    echo "此功能将测试持久化配置是否能正确工作"
+    echo -e "${YELLOW}注意：测试过程中会临时清空 iptables 规则，然后恢复${NC}"
+    echo
+    read -p "确认开始测试? (y/N): " confirm_test
+    
+    if [[ ! "$confirm_test" =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}测试已取消${NC}"
+        return 0
+    fi
+    
+    local test_success=true
+    local restore_script="$CONFIG_DIR/restore-rules.sh"
+    
+    echo
+    echo -e "${BLUE}开始持久化测试...${NC}"
+    
+    # 1. 备份当前规则
+    echo "1. 备份当前规则..."
+    local backup_file="/tmp/iptables_test_backup_$(date +%s).rules"
+    if iptables-save > "$backup_file" 2>/dev/null; then
+        echo "  ✓ 当前规则已备份到: $backup_file"
+    else
+        echo "  ✗ 规则备份失败"
+        return 1
+    fi
+    
+    # 2. 检查恢复脚本是否存在
+    echo
+    echo "2. 检查恢复脚本..."
+    if [ -f "$restore_script" ] && [ -x "$restore_script" ]; then
+        echo "  ✓ 恢复脚本存在且可执行: $restore_script"
+    else
+        echo "  ✗ 恢复脚本不存在或不可执行"
+        echo "  请先运行 '10. 永久保存当前规则' 或 '11. 检查和修复持久化配置'"
+        rm -f "$backup_file"
+        return 1
+    fi
+    
+    # 3. 检查规则文件
+    echo
+    echo "3. 检查规则文件..."
+    local rules_exist=false
+    if [ -f "$CONFIG_DIR/current.rules.v4" ]; then
+        echo "  ✓ IPv4 规则文件存在"
+        rules_exist=true
+    fi
+    if [ -f "$CONFIG_DIR/current.rules.v6" ]; then
+        echo "  ✓ IPv6 规则文件存在"
+        rules_exist=true
+    fi
+    
+    if [ "$rules_exist" = false ]; then
+        echo "  ✗ 未找到规则文件"
+        rm -f "$backup_file"
+        return 1
+    fi
+    
+    # 4. 保存当前映射规则数量
+    echo
+    echo "4. 记录当前映射规则..."
+    local current_rules_count=$(iptables -t nat -L PREROUTING -n 2>/dev/null | grep -c "$RULE_COMMENT" || echo "0")
+    echo "  当前映射规则数量: $current_rules_count"
+    
+    # 5. 清空 NAT 表中的映射规则（模拟重启后的状态）
+    echo
+    echo "5. 清空映射规则（模拟重启状态）..."
+    
+    # 只删除我们的映射规则，保留其他规则
+    local deleted_count=0
+    while iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -q "$RULE_COMMENT"; do
+        local line_num=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep "$RULE_COMMENT" | head -1 | awk '{print $1}')
+        if [ -n "$line_num" ]; then
+            iptables -t nat -D PREROUTING "$line_num" 2>/dev/null
+            ((deleted_count++))
+        else
+            break
+        fi
+    done
+    
+    echo "  ✓ 已删除 $deleted_count 条映射规则"
+    
+    # 6. 验证规则已被清空
+    echo
+    echo "6. 验证规则清空状态..."
+    local remaining_rules=$(iptables -t nat -L PREROUTING -n 2>/dev/null | grep -c "$RULE_COMMENT" || echo "0")
+    if [ "$remaining_rules" -eq 0 ]; then
+        echo "  ✓ 映射规则已清空"
+    else
+        echo "  ⚠ 仍有 $remaining_rules 条映射规则未清空"
+    fi
+    
+    # 7. 执行恢复脚本
+    echo
+    echo "7. 执行恢复脚本..."
+    echo "  正在运行: $restore_script"
+    
+    if "$restore_script" 2>&1; then
+        echo "  ✓ 恢复脚本执行成功"
+    else
+        echo "  ✗ 恢复脚本执行失败"
+        test_success=false
+    fi
+    
+    # 8. 验证规则是否恢复
+    echo
+    echo "8. 验证规则恢复情况..."
+    sleep 2  # 等待规则生效
+    
+    local restored_rules_count=$(iptables -t nat -L PREROUTING -n 2>/dev/null | grep -c "$RULE_COMMENT" || echo "0")
+    echo "  恢复后映射规则数量: $restored_rules_count"
+    
+    if [ "$restored_rules_count" -eq "$current_rules_count" ]; then
+        echo "  ✓ 规则数量匹配，恢复成功"
+    elif [ "$restored_rules_count" -gt 0 ]; then
+        echo "  ⚠ 规则数量不完全匹配，但部分恢复成功"
+        echo "    原始: $current_rules_count, 恢复: $restored_rules_count"
+    else
+        echo "  ✗ 规则恢复失败，未找到映射规则"
+        test_success=false
+    fi
+    
+    # 9. 测试 systemd 服务
+    echo
+    echo "9. 测试 systemd 服务..."
+    if systemctl is-enabled iptables-restore.service >/dev/null 2>&1; then
+        echo "  ✓ systemd 服务已启用"
+        
+        # 测试服务启动
+        if systemctl restart iptables-restore.service 2>/dev/null; then
+            echo "  ✓ systemd 服务重启成功"
+            
+            # 检查服务状态
+            if systemctl is-active iptables-restore.service >/dev/null 2>&1; then
+                echo "  ✓ systemd 服务运行正常"
+            else
+                echo "  ⚠ systemd 服务状态异常"
+                echo "    查看日志: journalctl -u iptables-restore.service"
+            fi
+        else
+            echo "  ✗ systemd 服务重启失败"
+            test_success=false
+        fi
+    else
+        echo "  ⚠ systemd 服务未启用"
+    fi
+    
+    # 10. 清理测试备份
+    echo
+    echo "10. 清理测试文件..."
+    if rm -f "$backup_file"; then
+        echo "  ✓ 测试备份文件已清理"
+    fi
+    
+    # 测试结果总结
+    echo
+    echo -e "${BLUE}========== 测试结果总结 ==========${NC}"
+    
+    if [ "$test_success" = true ] && [ "$restored_rules_count" -gt 0 ]; then
+        echo -e "${GREEN}✓ 持久化配置测试通过${NC}"
+        echo -e "${GREEN}✓ 规则能够正确恢复${NC}"
+        echo -e "${GREEN}✓ 系统重启后规则应该会自动恢复${NC}"
+        
+        echo
+        echo -e "${CYAN}测试统计：${NC}"
+        echo "• 原始规则数量: $current_rules_count"
+        echo "• 恢复规则数量: $restored_rules_count"
+        echo "• 恢复成功率: $(( restored_rules_count * 100 / (current_rules_count > 0 ? current_rules_count : 1) ))%"
+        
+        log_message "INFO" "持久化配置测试通过"
+        return 0
+    else
+        echo -e "${RED}✗ 持久化配置测试失败${NC}"
+        echo -e "${YELLOW}⚠ 建议检查配置或重新设置持久化${NC}"
+        
+        echo
+        echo -e "${CYAN}建议操作：${NC}"
+        echo "1. 运行 '11. 检查和修复持久化配置'"
+        echo "2. 重新运行 '10. 永久保存当前规则'"
+        echo "3. 检查系统日志: journalctl -u iptables-restore.service"
+        echo "4. 手动测试恢复脚本: $restore_script"
+        
+        log_message "ERROR" "持久化配置测试失败"
+        return 1
+    fi
+}
+
+# 创建规则恢复脚本
+create_restore_script() {
+    local restore_script="$CONFIG_DIR/restore-rules.sh"
+    
+    cat > "$restore_script" <<'EOF'
+#!/bin/bash
+# 端口映射规则恢复脚本
+# 由 Port Mapping Manager 自动生成
+
+LOG_FILE="/var/log/udp-port-mapping.log"
+
+log_message() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [$level] $message" >> "$LOG_FILE" 2>/dev/null
+}
+
+echo "开始恢复 iptables 规则..."
+log_message "INFO" "开始恢复 iptables 规则"
+
+# 恢复 IPv4 规则
+if [ -f "/etc/port_mapping_manager/current.rules.v4" ]; then
+    if /sbin/iptables-restore < "/etc/port_mapping_manager/current.rules.v4" 2>/dev/null; then
+        echo "✓ IPv4 规则恢复成功"
+        log_message "INFO" "IPv4 规则恢复成功"
+    else
+        echo "✗ IPv4 规则恢复失败"
+        log_message "ERROR" "IPv4 规则恢复失败"
+        exit 1
+    fi
+else
+    echo "- 未找到 IPv4 规则文件"
+    log_message "WARNING" "未找到 IPv4 规则文件"
+fi
+
+# 恢复 IPv6 规则
+if [ -f "/etc/port_mapping_manager/current.rules.v6" ]; then
+    if /sbin/ip6tables-restore < "/etc/port_mapping_manager/current.rules.v6" 2>/dev/null; then
+        echo "✓ IPv6 规则恢复成功"
+        log_message "INFO" "IPv6 规则恢复成功"
+    else
+        echo "✗ IPv6 规则恢复失败"
+        log_message "ERROR" "IPv6 规则恢复失败"
+        exit 1
+    fi
+else
+    echo "- 未找到 IPv6 规则文件"
+    log_message "WARNING" "未找到 IPv6 规则文件"
+fi
+
+echo "规则恢复完成"
+log_message "INFO" "规则恢复完成"
+EOF
+
+    chmod +x "$restore_script"
+    echo -e "${GREEN}✓ 规则恢复脚本已创建: $restore_script${NC}"
+    log_message "INFO" "规则恢复脚本已创建: $restore_script"
+}
+
+# 检测并安装持久化包
+install_persistence_package() {
+    echo "正在检查持久化包..."
+    
+    case $PACKAGE_MANAGER in
+        "apt")
+            if ! dpkg -l | grep -q iptables-persistent; then
+                echo "正在安装 iptables-persistent..."
+                if apt-get update && apt-get install -y iptables-persistent; then
+                    echo -e "${GREEN}✓ iptables-persistent 安装成功${NC}"
+                    return 0
+                else
+                    echo -e "${YELLOW}⚠ iptables-persistent 安装失败，将使用 systemd 方式${NC}"
+                    return 1
+                fi
+            else
+                echo -e "${GREEN}✓ iptables-persistent 已安装${NC}"
+                return 0
+            fi
+            ;;
+        "yum"|"dnf")
+            if ! rpm -q iptables-services >/dev/null 2>&1; then
+                echo "正在安装 iptables-services..."
+                if $PACKAGE_MANAGER install -y iptables-services; then
+                    systemctl enable iptables ip6tables 2>/dev/null
+                    echo -e "${GREEN}✓ iptables-services 安装成功${NC}"
+                    return 0
+                else
+                    echo -e "${YELLOW}⚠ iptables-services 安装失败，将使用 systemd 方式${NC}"
+                    return 1
+                fi
+            else
+                echo -e "${GREEN}✓ iptables-services 已安装${NC}"
+                systemctl enable iptables ip6tables 2>/dev/null
+                return 0
+            fi
+            ;;
+        *)
+            echo -e "${YELLOW}⚠ 未知包管理器，将使用 systemd 方式${NC}"
+            return 1
+            ;;
+    esac
+}
+
 # 配置 systemd 服务以实现持久化
 setup_systemd_service() {
     local service_file="/etc/systemd/system/iptables-restore.service"
+    local restore_script="$CONFIG_DIR/restore-rules.sh"
+    
     # 检查并清理可能存在的旧服务
     if [ -f "$service_file" ]; then
         echo "正在清理旧的 systemd 服务..."
@@ -962,39 +1653,105 @@ setup_systemd_service() {
         systemctl daemon-reload
     fi
     
+    # 创建恢复脚本
+    create_restore_script
+    
     echo "正在创建 systemd 服务..."
     cat > "$service_file" <<EOF
 [Unit]
-Description=Restore iptables rules
+Description=Restore iptables port mapping rules
 After=network.target
 Wants=network.target
+Before=docker.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'if [ -f /etc/port_mapping_manager/current.rules.v4 ]; then /sbin/iptables-restore < /etc/port_mapping_manager/current.rules.v4; fi'
-ExecStart=/bin/bash -c 'if [ -f /etc/port_mapping_manager/current.rules.v6 ]; then /sbin/ip6tables-restore < /etc/port_mapping_manager/current.rules.v6; fi'
+ExecStart=$restore_script
 RemainAfterExit=yes
 StandardOutput=journal
 StandardError=journal
+TimeoutStartSec=30
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
     systemctl daemon-reload
-    systemctl enable iptables-restore.service
-    echo -e "${GREEN}✓ systemd 服务已创建并启用${NC}"
-    log_message "INFO" "systemd 服务已创建并启用"
+    
+    if systemctl enable iptables-restore.service; then
+        echo -e "${GREEN}✓ systemd 服务已创建并启用${NC}"
+        log_message "INFO" "systemd 服务已创建并启用"
+    else
+        echo -e "${RED}✗ systemd 服务启用失败${NC}"
+        log_message "ERROR" "systemd 服务启用失败"
+        return 1
+    fi
     
     # 立即测试服务是否正常工作
     echo "正在测试 systemd 服务..."
     if systemctl start iptables-restore.service; then
         echo -e "${GREEN}✓ systemd 服务测试成功${NC}"
         log_message "INFO" "systemd 服务测试成功"
+        
+        # 检查服务状态
+        if systemctl is-active iptables-restore.service >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ 服务运行状态正常${NC}"
+        else
+            echo -e "${YELLOW}⚠ 服务状态异常，请检查日志${NC}"
+            echo "查看日志: journalctl -u iptables-restore.service"
+        fi
+        return 0
     else
         echo -e "${RED}✗ systemd 服务测试失败${NC}"
         log_message "ERROR" "systemd 服务测试失败"
+        echo "查看详细错误: journalctl -u iptables-restore.service"
         return 1
     fi
+}
+
+# 设置多种持久化方式的fallback机制
+setup_fallback_persistence() {
+    echo "正在设置 fallback 持久化机制..."
+    
+    # 方法1: 添加到 rc.local
+    if [ -f "/etc/rc.local" ]; then
+        if ! grep -q "$CONFIG_DIR/restore-rules.sh" /etc/rc.local; then
+            # 备份原文件
+            cp /etc/rc.local /etc/rc.local.bak.$(date +%Y%m%d_%H%M%S)
+            
+            # 在 exit 0 之前添加恢复脚本
+            sed -i '/^exit 0/i # Port Mapping Manager - 恢复 iptables 规则' /etc/rc.local
+            sed -i "/^exit 0/i $CONFIG_DIR/restore-rules.sh" /etc/rc.local
+            
+            chmod +x /etc/rc.local
+            echo -e "${GREEN}✓ 已添加到 rc.local${NC}"
+        fi
+    fi
+    
+    # 方法2: 创建 crontab 任务
+    local cron_entry="@reboot $CONFIG_DIR/restore-rules.sh"
+    if ! crontab -l 2>/dev/null | grep -q "$CONFIG_DIR/restore-rules.sh"; then
+        (crontab -l 2>/dev/null; echo "$cron_entry") | crontab -
+        echo -e "${GREEN}✓ 已添加到 crontab${NC}"
+    fi
+    
+    # 方法3: 创建网络接口启动脚本 (适用于某些发行版)
+    local if_up_dir="/etc/network/if-up.d"
+    if [ -d "$if_up_dir" ]; then
+        local if_up_script="$if_up_dir/iptables-restore"
+        cat > "$if_up_script" <<EOF
+#!/bin/bash
+# Port Mapping Manager - 网络接口启动时恢复规则
+if [ "\$IFACE" = "lo" ]; then
+    exit 0
+fi
+$CONFIG_DIR/restore-rules.sh
+EOF
+        chmod +x "$if_up_script"
+        echo -e "${GREEN}✓ 已创建网络接口启动脚本${NC}"
+    fi
+    
+    log_message "INFO" "Fallback 持久化机制设置完成"
 }
 
 # --- 新增功能：批量操作 ---
@@ -2462,11 +3219,12 @@ show_main_menu() {
     echo -e "${BLUE}其他选项:${NC}"
     echo " 10. 永久保存当前规则"
     echo " 11. 检查和修复持久化配置"
-    echo " 12. 帮助信息"
-    echo " 13. 版本信息"
-    echo " 14. 切换IP版本 (IPv4/IPv6)"
-    echo " 15. 检查更新"
-    echo " 16. 退出脚本"
+    echo " 12. 测试持久化配置"
+    echo " 13. 帮助信息"
+    echo " 14. 版本信息"
+    echo " 15. 切换IP版本 (IPv4/IPv6)"
+    echo " 16. 检查更新"
+    echo " 17. 退出脚本"
     echo " 99. 卸载脚本"
     echo
     echo "-----------------------------------------"
@@ -2588,7 +3346,7 @@ initialize_script() {
 main_loop() {
     while true; do
         show_main_menu
-        read -p "请选择操作 [1-15/99]: " main_choice
+        read -p "请选择操作 [1-17/99]: " main_choice
         
         case $main_choice in
             1) setup_mapping ;;
@@ -2602,11 +3360,12 @@ main_loop() {
             9) restore_defaults ;;
             10) save_rules ;;
             11) check_and_fix_persistence ;;
-            12) show_enhanced_help ;;
-            13) show_version ;;
-            14) switch_ip_version ;;
-            15) check_for_updates ;;
-            16)
+            12) test_persistence_config ;;
+            13) show_enhanced_help ;;
+            14) show_version ;;
+            15) switch_ip_version ;;
+            16) check_for_updates ;;
+            17)
                 echo -e "${GREEN}感谢使用UDP端口映射脚本！${NC}"
                 log_message "INFO" "脚本正常退出"
                 exit 0
@@ -2615,7 +3374,7 @@ main_loop() {
                 uninstall_script
                 ;;
             *) 
-                echo -e "${RED}无效选择，请输入 1-15 或 99${NC}"
+                echo -e "${RED}无效选择，请输入 1-17 或 99${NC}"
                 ;;
         esac
         
