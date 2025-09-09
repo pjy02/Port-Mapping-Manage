@@ -2640,6 +2640,71 @@ full_reset_iptables() {
 
 # --- 一键卸载功能 ---
 
+# 权限检查函数
+check_uninstall_permissions() {
+    local errors=0
+    
+    # 检查 root 权限
+    if [ "$EUID" -ne 0 ]; then
+        echo "  ✗ 错误: 需要 root 权限执行卸载操作"
+        ((errors++))
+    else
+        echo "  ✓ Root 权限检查通过"
+    fi
+    
+    # 检查 iptables 命令
+    for cmd in iptables ip6tables; do
+        if ! command -v "$cmd" &>/dev/null; then
+            echo "  ✗ 错误: $cmd 命令不可用"
+            ((errors++))
+        else
+            echo "  ✓ $cmd 命令可用"
+        fi
+    done
+    
+    # 检查 systemctl 命令（如果系统支持）
+    if command -v systemctl &>/dev/null; then
+        echo "  ✓ systemctl 命令可用"
+        
+        # 检查 systemd 目录权限
+        if [ -d "/etc/systemd/system" ] && [ ! -w "/etc/systemd/system" ]; then
+            echo "  ✗ 错误: 没有 /etc/systemd/system 目录写权限"
+            ((errors++))
+        else
+            echo "  ✓ systemd 目录权限正常"
+        fi
+    else
+        echo "  ⚠ systemctl 命令不可用，将跳过 systemd 服务清理"
+    fi
+    
+    # 检查关键目录的写权限
+    local dirs_to_check=()
+    [ -d "$CONFIG_DIR" ] && dirs_to_check+=("$CONFIG_DIR")
+    [ -d "$BACKUP_DIR" ] && dirs_to_check+=("$BACKUP_DIR")
+    [ -d "$(dirname "$LOG_FILE")" ] && dirs_to_check+=("$(dirname "$LOG_FILE")")
+    
+    for dir in "${dirs_to_check[@]}"; do
+        if [ ! -w "$dir" ]; then
+            echo "  ✗ 错误: 没有目录写权限: $dir"
+            ((errors++))
+        else
+            echo "  ✓ 目录权限正常: $dir"
+        fi
+    done
+    
+    # 检查当前脚本是否可删除
+    local current_script="$(realpath "$0" 2>/dev/null || echo "$0")"
+    local script_dir="$(dirname "$current_script")"
+    if [ ! -w "$script_dir" ]; then
+        echo "  ⚠ 警告: 无法删除当前脚本文件 (目录无写权限): $script_dir"
+        echo "    脚本功能不受影响，但需要手动删除脚本文件"
+    else
+        echo "  ✓ 当前脚本可删除"
+    fi
+    
+    return $errors
+}
+
 # 删除指定IP版本的规则
 delete_rules_by_version() {
     local ip_version=$1
@@ -2665,30 +2730,37 @@ delete_rules_by_version() {
         return 1
     fi
     
-    # 获取规则列表
-    local rule_lines=()
-    if rule_lines=($($iptables_cmd -t nat -L PREROUTING --line-numbers 2>/dev/null | grep "$rule_comment" | awk '{print $1}' | sort -nr)); then
-        echo "  - 调试: 找到 ${#rule_lines[@]} 条规则"
-    else
-        echo "  - 调试: 获取规则列表失败"
-        rule_lines=()
-    fi
-    
-    if [ ${#rule_lines[@]} -eq 0 ]; then
-        echo "  - 未找到 IPv${ip_version} 规则"
-        return 0
-    fi
-    
+    # 使用更安全的规则删除方法（逐个删除，避免行号变化问题）
     local deleted_count=0
-    for line_num in "${rule_lines[@]}"; do
+    local max_attempts=100  # 防止无限循环
+    local attempts=0
+    
+    echo "  - 开始删除 IPv${ip_version} 规则..."
+    
+    while [ $attempts -lt $max_attempts ]; do
+        # 获取第一个匹配的规则行号
+        local line_num=$($iptables_cmd -t nat -L PREROUTING --line-numbers 2>/dev/null | grep "$rule_comment" | head -1 | awk '{print $1}')
+        
+        if [ -z "$line_num" ]; then
+            echo "  - 没有更多 IPv${ip_version} 规则需要删除"
+            break
+        fi
+        
         echo "  - 尝试删除 IPv${ip_version} 规则 #$line_num"
         if $iptables_cmd -t nat -D PREROUTING "$line_num" 2>/dev/null; then
             echo "  - ✓ 成功删除 IPv${ip_version} 规则 #$line_num"
             ((deleted_count++))
         else
             echo "  - ✗ 删除 IPv${ip_version} 规则 #$line_num 失败"
+            break
         fi
+        
+        ((attempts++))
     done
+    
+    if [ $attempts -eq $max_attempts ]; then
+        echo "  - ⚠ 达到最大删除尝试次数，可能存在无法删除的规则"
+    fi
     
     echo "  - 总计删除了 $deleted_count 条 IPv${ip_version} 规则"
     return $deleted_count
@@ -2710,31 +2782,61 @@ cleanup_systemd_services() {
     local operation_success=true
     local service_found=false
     
-    # 停止并禁用服务
-    for service in "${services[@]}"; do
-        echo "  - 检查服务: $service"
+    # 安全停止服务函数
+    safe_stop_service() {
+        local service=$1
+        local timeout=10
+        local success=true
+        
+        # 先禁用服务
         if systemctl is-enabled "$service" &>/dev/null; then
-            service_found=true
             if systemctl disable "$service" 2>/dev/null; then
                 echo "  - ✓ 已禁用 $service"
             else
                 echo "  - ✗ 禁用 $service 失败"
-                operation_success=false
+                success=false
             fi
-        else
-            echo "  - 服务 $service 未启用"
         fi
         
+        # 停止服务
         if systemctl is-active "$service" &>/dev/null; then
-            service_found=true
+            echo "  - 正在停止 $service..."
             if systemctl stop "$service" 2>/dev/null; then
-                echo "  - ✓ 已停止 $service"
+                # 等待服务完全停止
+                local count=0
+                while systemctl is-active "$service" &>/dev/null && [ $count -lt $timeout ]; do
+                    sleep 1
+                    ((count++))
+                done
+                
+                if systemctl is-active "$service" &>/dev/null; then
+                    echo "  - ⚠ 服务 $service 未能在 ${timeout}s 内停止"
+                    success=false
+                else
+                    echo "  - ✓ 已停止 $service"
+                fi
             else
                 echo "  - ✗ 停止 $service 失败"
+                success=false
+            fi
+        fi
+        
+        return $([ "$success" = true ] && echo 0 || echo 1)
+    }
+    
+    # 停止并禁用服务
+    for service in "${services[@]}"; do
+        echo "  - 检查服务: $service"
+        if systemctl list-unit-files "$service" &>/dev/null; then
+            service_found=true
+            if safe_stop_service "$service"; then
+                echo "  - ✓ 服务 $service 处理成功"
+            else
+                echo "  - ✗ 服务 $service 处理失败"
                 operation_success=false
             fi
         else
-            echo "  - 服务 $service 未运行"
+            echo "  - 服务 $service 不存在"
         fi
     done
     
@@ -2812,6 +2914,15 @@ complete_uninstall() {
     echo "  ✓ 尝试恢复系统到初始状态"
     echo
     echo -e "${RED}⚠ 此操作不可逆！所有数据将永久丢失！${NC}"
+    echo
+    
+    # 权限检查
+    echo "正在检查卸载权限..."
+    if ! check_uninstall_permissions; then
+        echo -e "${RED}权限检查失败，无法继续卸载${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✓ 权限检查通过${NC}"
     echo
     
     read -p "确认执行完全卸载? (输入 FULL_UNINSTALL 来确认): " confirm
@@ -2922,11 +3033,47 @@ complete_uninstall() {
     
     # 6. 删除脚本文件
     echo "6. 删除脚本文件..."
-    local paths=("/usr/local/bin/port_mapping_manager.sh" "/usr/local/bin/pmm" "/etc/port_mapping_manager/port_mapping_manager.sh" "/etc/port_mapping_manager/pmm" "$(dirname "$0")/pmm")
     local deleted_count=0
     local script_failed=false
     
-    for p in "${paths[@]}"; do 
+    # 智能查找脚本文件位置
+    local script_paths=()
+    
+    # 添加常见安装路径
+    script_paths+=("/usr/local/bin/port_mapping_manager.sh")
+    script_paths+=("/usr/local/bin/pmm")
+    script_paths+=("/usr/bin/port_mapping_manager.sh")
+    script_paths+=("/usr/bin/pmm")
+    script_paths+=("/etc/port_mapping_manager/port_mapping_manager.sh")
+    script_paths+=("/etc/port_mapping_manager/pmm")
+    
+    # 添加当前脚本目录下的相关文件
+    local current_dir="$(dirname "$0")"
+    script_paths+=("$current_dir/pmm")
+    script_paths+=("$current_dir/port_mapping_manager.sh")
+    
+    # 查找 PATH 中的脚本
+    if command -v pmm >/dev/null 2>&1; then
+        local pmm_path="$(command -v pmm)"
+        script_paths+=("$pmm_path")
+        echo "  - 发现 PATH 中的 pmm: $pmm_path"
+    fi
+    
+    # 查找可能的符号链接
+    for path in "${script_paths[@]}"; do
+        if [ -L "$path" ]; then
+            local target="$(readlink "$path" 2>/dev/null)"
+            if [ -n "$target" ]; then
+                script_paths+=("$target")
+                echo "  - 发现符号链接目标: $path -> $target"
+            fi
+        fi
+    done
+    
+    # 去重并删除文件
+    local unique_paths=($(printf '%s\n' "${script_paths[@]}" | sort -u))
+    
+    for p in "${unique_paths[@]}"; do 
         if [ -f "$p" ]; then
             echo "  - 正在删除: $p"
             if rm -f "$p" 2>/dev/null; then
@@ -2936,8 +3083,15 @@ complete_uninstall() {
                 echo "  - ✗ 删除失败: $p (可能需要权限)"
                 script_failed=true
             fi
-        else
-            echo "  - 文件不存在: $p"
+        elif [ -L "$p" ]; then
+            echo "  - 正在删除符号链接: $p"
+            if rm -f "$p" 2>/dev/null; then
+                echo "  - ✓ 已删除符号链接: $p"
+                ((deleted_count++))
+            else
+                echo "  - ✗ 删除符号链接失败: $p (可能需要权限)"
+                script_failed=true
+            fi
         fi
     done
     
@@ -2971,16 +3125,41 @@ complete_uninstall() {
     echo
     read -p "是否删除当前脚本文件？(y/N): " delete_self
     if [[ "$delete_self" =~ ^[Yy]$ ]]; then
-        echo "正在删除当前脚本文件..."
-        if rm -f "$current_script" 2>/dev/null; then
-            echo "  - ✓ 当前脚本文件已删除"
-            echo "脚本已成功删除"
+        echo "正在准备删除当前脚本..."
+        
+        # 创建临时清理脚本，使用安全的延迟删除
+        local cleanup_script="/tmp/pmm_cleanup_$$.sh"
+        cat > "$cleanup_script" << EOF
+#!/bin/bash
+# 临时清理脚本 - 自动生成
+sleep 3
+echo "正在删除脚本文件: $current_script"
+if rm -f "$current_script" 2>/dev/null; then
+    echo "✓ 脚本文件删除成功"
+else
+    echo "✗ 脚本文件删除失败，请手动删除: $current_script"
+fi
+# 删除自身
+rm -f "$0" 2>/dev/null
+EOF
+        
+        if chmod +x "$cleanup_script" 2>/dev/null; then
+            echo "  - ✓ 清理脚本已创建: $cleanup_script"
+            echo "  - 脚本将在3秒后自动删除"
+            echo "  - 正在启动后台清理进程..."
+            
+            # 启动后台清理进程
+            nohup "$cleanup_script" >/dev/null 2>&1 &
+            local cleanup_pid=$!
+            
+            echo "  - ✓ 清理进程已启动 (PID: $cleanup_pid)"
+            echo "  - 当前脚本将在退出后被自动删除"
         else
-            echo "  - ✗ 删除当前脚本文件失败 (可能需要权限)"
-            echo "请手动删除: $current_script"
+            echo "  - ✗ 创建清理脚本失败，请手动删除: $current_script"
+            rm -f "$cleanup_script" 2>/dev/null
         fi
     else
-        echo "脚本文件保留，请手动删除: $current_script"
+        echo "脚本文件保留，如需删除请手动执行: rm -f $current_script"
     fi
     echo
 }
