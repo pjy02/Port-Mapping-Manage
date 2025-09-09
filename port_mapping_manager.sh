@@ -28,21 +28,284 @@ VERBOSE_MODE=false
 AUTO_BACKUP=true
 IP_VERSION="4" # 默认使用IPv4
 
+# 性能优化缓存变量
+IPTABLES_CACHE_FILE=""
+IPTABLES_CACHE_TIMESTAMP=0
+IPTABLES_CACHE_TTL=30  # 缓存有效期30秒
+RULES_CACHE=""
+RULES_CACHE_TIMESTAMP=0
+
 # --- 日志和安全函数 ---
 
 # 日志记录函数
 log_message() {
     local level=$1
     local message=$2
+    local function_name=${3:-"${FUNCNAME[1]}"}  # 自动获取调用函数名
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] [$level] $message" | tee -a "$LOG_FILE" >/dev/null 2>&1
+    local pid=$$
+    
+    # 确保日志目录存在
+    if [ -n "$LOG_FILE" ]; then
+        local log_dir=$(dirname "$LOG_FILE")
+        [ ! -d "$log_dir" ] && mkdir -p "$log_dir" 2>/dev/null
+    fi
+    
+    # 构建日志条目
+    local log_entry="[$timestamp] [PID:$pid] [$level] [$function_name] $message"
+    
+    # 写入日志文件
+    if [ -n "$LOG_FILE" ]; then
+        echo "$log_entry" >> "$LOG_FILE" 2>/dev/null
+    fi
+    
+    # 根据级别和详细模式决定是否显示到控制台
+    case "$level" in
+        "ERROR"|"CRITICAL")
+            echo -e "${RED}[$level] $message${NC}" >&2
+            ;;
+        "WARNING")
+            [ "$VERBOSE_MODE" = true ] && echo -e "${YELLOW}[$level] $message${NC}"
+            ;;
+        "INFO")
+            [ "$VERBOSE_MODE" = true ] && echo -e "${GREEN}[$level] $message${NC}"
+            ;;
+        "DEBUG")
+            [ "$VERBOSE_MODE" = true ] && echo -e "${CYAN}[$level] $message${NC}"
+            ;;
+    esac
 }
 
 # 输入安全验证
 sanitize_input() {
     local input="$1"
-    # 只允许数字、字母、短横线、下划线
-    echo "$input" | sed 's/[^a-zA-Z0-9._-]//g'
+    local type="${2:-default}"
+    
+    case "$type" in
+        "port")
+            # 端口号只允许数字
+            echo "$input" | sed 's/[^0-9]//g'
+            ;;
+        "filename")
+            # 文件名允许字母数字和安全字符
+            echo "$input" | sed 's/[^a-zA-Z0-9._-]//g'
+            ;;
+        "ip")
+            # IP地址允许数字、点号和冒号(IPv6)
+            echo "$input" | sed 's/[^0-9a-fA-F.:]//g'
+            ;;
+        "protocol")
+            # 协议只允许字母
+            echo "$input" | sed 's/[^a-zA-Z]//g' | tr '[:upper:]' '[:lower:]'
+            ;;
+        *)
+            # 默认清理：只允许数字、字母、短横线、下划线
+            echo "$input" | sed 's/[^a-zA-Z0-9._-]//g'
+            ;;
+    esac
+}
+
+# 验证环境变量和系统状态
+validate_environment() {
+    local errors=0
+    
+    # 检查必要的环境变量
+    if [ -z "$CONFIG_DIR" ]; then
+        echo -e "${RED}错误: CONFIG_DIR 未设置${NC}"
+        log_message "ERROR" "CONFIG_DIR 环境变量未设置"
+        ((errors++))
+    elif [ ! -d "$CONFIG_DIR" ]; then
+        echo -e "${YELLOW}警告: CONFIG_DIR 目录不存在，正在创建...${NC}"
+        if ! mkdir -p "$CONFIG_DIR" 2>/dev/null; then
+            echo -e "${RED}错误: 无法创建 CONFIG_DIR: $CONFIG_DIR${NC}"
+            log_message "ERROR" "无法创建 CONFIG_DIR: $CONFIG_DIR"
+            ((errors++))
+        fi
+    fi
+    
+    if [ -z "$BACKUP_DIR" ]; then
+        echo -e "${RED}错误: BACKUP_DIR 未设置${NC}"
+        log_message "ERROR" "BACKUP_DIR 环境变量未设置"
+        ((errors++))
+    elif [ ! -d "$BACKUP_DIR" ]; then
+        echo -e "${YELLOW}警告: BACKUP_DIR 目录不存在，正在创建...${NC}"
+        if ! mkdir -p "$BACKUP_DIR" 2>/dev/null; then
+            echo -e "${RED}错误: 无法创建 BACKUP_DIR: $BACKUP_DIR${NC}"
+            log_message "ERROR" "无法创建 BACKUP_DIR: $BACKUP_DIR"
+            ((errors++))
+        fi
+    fi
+    
+    if [ -z "$LOG_FILE" ]; then
+        echo -e "${RED}错误: LOG_FILE 未设置${NC}"
+        log_message "ERROR" "LOG_FILE 环境变量未设置"
+        ((errors++))
+    else
+        # 确保日志文件目录存在
+        local log_dir=$(dirname "$LOG_FILE")
+        if [ ! -d "$log_dir" ]; then
+            if ! mkdir -p "$log_dir" 2>/dev/null; then
+                echo -e "${RED}错误: 无法创建日志目录: $log_dir${NC}"
+                ((errors++))
+            fi
+        fi
+        # 确保日志文件可写
+        if ! touch "$LOG_FILE" 2>/dev/null; then
+            echo -e "${RED}错误: 无法写入日志文件: $LOG_FILE${NC}"
+            ((errors++))
+        fi
+    fi
+    
+    if [ -z "$IP_VERSION" ]; then
+        echo -e "${YELLOW}警告: IP_VERSION 未设置，使用默认值 4${NC}"
+        IP_VERSION="4"
+        log_message "WARNING" "IP_VERSION 未设置，使用默认值 4"
+    elif [[ ! "$IP_VERSION" =~ ^[46]$ ]]; then
+        echo -e "${RED}错误: IP_VERSION 必须是 4 或 6${NC}"
+        log_message "ERROR" "IP_VERSION 值无效: $IP_VERSION"
+        ((errors++))
+    fi
+    
+    if [ -z "$RULE_COMMENT" ]; then
+        echo -e "${YELLOW}警告: RULE_COMMENT 未设置，使用默认值${NC}"
+        RULE_COMMENT="udp-port-mapping-script-v3"
+        log_message "WARNING" "RULE_COMMENT 未设置，使用默认值"
+    fi
+    
+    # 检查关键命令的可用性
+    local required_commands=("iptables" "iptables-save" "ss" "grep" "awk" "sed")
+    if [ "$IP_VERSION" = "6" ]; then
+        required_commands+=("ip6tables" "ip6tables-save")
+    fi
+    
+    for cmd in "${required_commands[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            echo -e "${RED}错误: 必需命令不可用: $cmd${NC}"
+            log_message "ERROR" "必需命令不可用: $cmd"
+            ((errors++))
+        fi
+    done
+    
+    # 检查权限
+    if [ "$(id -u)" -ne 0 ]; then
+        echo -e "${RED}错误: 需要 root 权限${NC}"
+        log_message "ERROR" "权限不足，需要 root 权限"
+        ((errors++))
+    fi
+    
+    # 检查 iptables 功能
+    local iptables_cmd=$(get_iptables_cmd)
+    if ! $iptables_cmd -t nat -L >/dev/null 2>&1; then
+        echo -e "${RED}错误: $iptables_cmd NAT 功能不可用${NC}"
+        log_message "ERROR" "$iptables_cmd NAT 功能不可用"
+        ((errors++))
+    fi
+    
+    if [ $errors -eq 0 ]; then
+        log_message "INFO" "环境验证通过"
+        return 0
+    else
+        log_message "ERROR" "环境验证失败，发现 $errors 个问题"
+        return $errors
+    fi
+}
+
+# --- 性能优化缓存函数 ---
+
+# 缓存 iptables 规则
+cache_iptables_rules() {
+    local ip_version=${1:-$IP_VERSION}
+    local current_time=$(date +%s)
+    local cache_key="iptables_${ip_version}"
+    
+    # 检查缓存是否仍然有效
+    if [ -n "$RULES_CACHE" ] && [ $((current_time - RULES_CACHE_TIMESTAMP)) -lt $IPTABLES_CACHE_TTL ]; then
+        log_message "DEBUG" "使用缓存的 iptables 规则"
+        echo "$RULES_CACHE"
+        return 0
+    fi
+    
+    local iptables_cmd=$(get_iptables_cmd "$ip_version")
+    if [ -z "$iptables_cmd" ]; then
+        log_message "ERROR" "无法获取 iptables 命令"
+        return 1
+    fi
+    
+    log_message "DEBUG" "刷新 iptables 规则缓存"
+    RULES_CACHE=$($iptables_cmd -t nat -L PREROUTING -n --line-numbers 2>/dev/null)
+    RULES_CACHE_TIMESTAMP=$current_time
+    
+    if [ $? -eq 0 ]; then
+        echo "$RULES_CACHE"
+        return 0
+    else
+        log_message "ERROR" "获取 iptables 规则失败"
+        return 1
+    fi
+}
+
+# 清除缓存
+clear_iptables_cache() {
+    log_message "DEBUG" "清除 iptables 缓存"
+    RULES_CACHE=""
+    RULES_CACHE_TIMESTAMP=0
+    
+    # 清理临时缓存文件
+    if [ -n "$IPTABLES_CACHE_FILE" ] && [ -f "$IPTABLES_CACHE_FILE" ]; then
+        rm -f "$IPTABLES_CACHE_FILE" 2>/dev/null
+        IPTABLES_CACHE_FILE=""
+    fi
+}
+
+# 批量获取端口状态（性能优化）
+batch_check_port_status() {
+    local ports=("$@")
+    local tcp_ports=()
+    local udp_ports=()
+    
+    if [ ${#ports[@]} -eq 0 ]; then
+        return 0
+    fi
+    
+    log_message "DEBUG" "批量检查 ${#ports[@]} 个端口状态"
+    
+    # 一次性获取所有监听端口
+    local tcp_listening=$(ss -tlnp 2>/dev/null | awk '{print $4}' | grep -o ':[0-9]*$' | sed 's/://' | sort -n | uniq)
+    local udp_listening=$(ss -ulnp 2>/dev/null | awk '{print $4}' | grep -o ':[0-9]*$' | sed 's/://' | sort -n | uniq)
+    
+    # 检查每个端口
+    for port_info in "${ports[@]}"; do
+        local port=$(echo "$port_info" | cut -d: -f1)
+        local protocol=$(echo "$port_info" | cut -d: -f2)
+        
+        if [ "$protocol" = "tcp" ]; then
+            if echo "$tcp_listening" | grep -q "^${port}$"; then
+                echo "${port}:tcp:active"
+            else
+                echo "${port}:tcp:inactive"
+            fi
+        else
+            if echo "$udp_listening" | grep -q "^${port}$"; then
+                echo "${port}:udp:active"
+            else
+                echo "${port}:udp:inactive"
+            fi
+        fi
+    done
+}
+
+# 优化的规则计数
+count_mapping_rules() {
+    local ip_version=${1:-$IP_VERSION}
+    
+    # 尝试从缓存获取
+    local rules=$(cache_iptables_rules "$ip_version")
+    if [ $? -ne 0 ]; then
+        return 0
+    fi
+    
+    # 计算包含脚本注释的规则数量
+    echo "$rules" | grep -c "$RULE_COMMENT" 2>/dev/null || echo "0"
 }
 
 # 创建必要的目录
@@ -97,7 +360,8 @@ detect_system() {
 
 # 根据IP版本获取正确的iptables命令
 get_iptables_cmd() {
-    if [ "$IP_VERSION" = "6" ]; then
+    local ip_version=${1:-$IP_VERSION}  # 接受参数，默认使用全局变量
+    if [ "$ip_version" = "6" ]; then
         echo "ip6tables"
     else
         echo "iptables"
@@ -115,43 +379,65 @@ check_root() {
 
 # 交互式清理备份文件
 interactive_cleanup_backups() {
-    local backups=( $(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null) )
-    if [ ${#backups[@]} -eq 0 ]; then
+    # 使用更兼容的方式处理文件列表
+    local backup_files
+    backup_files=$(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null)
+    
+    if [ -z "$backup_files" ]; then
         echo -e "${YELLOW}未找到备份文件${NC}"
         return
     fi
-
+    
     echo -e "${BLUE}备份列表:${NC}"
-    for i in "${!backups[@]}"; do
-        local file=$(basename "${backups[$i]}")
-        local size=$(du -h "${backups[$i]}" | cut -f1)
-        local date=$(echo "$file" | sed 's/iptables_backup_\(.*\)\.rules/\1/' | sed 's/_/ /g')
-        echo "$((i+1)). $date ($size)"
-    done
+    local i=1
+    local backup_array=()
+    while IFS= read -r backup_file; do
+        if [ -f "$backup_file" ]; then
+            backup_array+=("$backup_file")
+            local file=$(basename "$backup_file")
+            local size=$(du -h "$backup_file" 2>/dev/null | cut -f1)
+            local date=$(echo "$file" | sed 's/iptables_backup_\(.*\)\.rules/\1/' | sed 's/_/ /g')
+            echo "$i. $date ($size)"
+            ((i++))
+        fi
+    done <<< "$backup_files"
+    
+    if [ ${#backup_array[@]} -eq 0 ]; then
+        echo -e "${YELLOW}未找到有效的备份文件${NC}"
+        return
+    fi
+    
     echo
     read -p "请输入要删除的备份序号(可输入多个，用空格、逗号等分隔，输入 all 删除全部): " choices
+    
     if [ "$choices" = "all" ]; then
-        rm -f "${backups[@]}"
-        echo -e "${GREEN}✓ 已删除全部备份${NC}"
-        log_message "INFO" "删除全部备份文件"
+        local deleted_count=0
+        for backup_file in "${backup_array[@]}"; do
+            if rm -f "$backup_file"; then
+                ((deleted_count++))
+            fi
+        done
+        echo -e "${GREEN}✓ 已删除 $deleted_count 个备份文件${NC}"
+        log_message "INFO" "删除全部备份文件: $deleted_count 个"
         return
     fi
 
     # 将所有非数字字符转换为空格作为分隔符
     choices=$(echo "$choices" | tr -cs '0-9' ' ')
-    read -ra selected <<< "$choices"
     local deleted=0
-    for sel in "${selected[@]}"; do
-        sel=$(echo "$sel" | xargs)
-        if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#backups[@]} ]; then
-            local target="${backups[$((sel-1))]}"
-            if rm -f "$target"; then
+    
+    # 使用更兼容的方式处理选择的序号
+    for sel in $choices; do
+        sel=$(echo "$sel" | xargs)  # 去除空白字符
+        if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#backup_array[@]} ]; then
+            local target="${backup_array[$((sel-1))]}"
+            if [ -f "$target" ] && rm -f "$target"; then
                 echo -e "${GREEN}✓ 删除备份: $(basename "$target")${NC}"
                 ((deleted++))
             else
                 echo -e "${RED}✗ 无法删除: $(basename "$target")${NC}"
             fi
-        else
+        elif [ -n "$sel" ]; then
             echo -e "${YELLOW}忽略无效序号: $sel${NC}"
         fi
     done
@@ -211,7 +497,7 @@ validate_port() {
     local port_name=$2
     
     # 输入清理
-    port=$(sanitize_input "$port")
+    port=$(sanitize_input "$port" "port")
     
     if [[ ! "$port" =~ ^[0-9]+$ ]]; then
         echo -e "${RED}错误：${port_name} 必须是纯数字。${NC}"
@@ -254,8 +540,11 @@ check_port_conflicts() {
     local end_port=$2
     local service_port=$3
     
+    # 根据当前IP版本获取对应的iptables命令
+    local iptables_cmd=$(get_iptables_cmd)
+    
     # 检查现有iptables规则冲突
-    local conflicts=$(iptables -t nat -L PREROUTING -n | grep -E "dpt:($start_port|$end_port|$service_port)([^0-9]|$)")
+    local conflicts=$($iptables_cmd -t nat -L PREROUTING -n | grep -E "dpt:($start_port|$end_port|$service_port)([^0-9]|$)")
     
     if [ -n "$conflicts" ]; then
         echo -e "${YELLOW}发现可能的端口冲突：${NC}"
@@ -300,14 +589,58 @@ save_mapping_config() {
     local start_port=$1
     local end_port=$2
     local service_port=$3
-    local timestamp=$(date '+%Y%m%d_%H%M%S')
+    local protocol=${4:-"udp"}
     
-    cat >> "$CONFIG_DIR/mappings.conf" << EOF
+    # 验证参数
+    if [ -z "$start_port" ] || [ -z "$end_port" ] || [ -z "$service_port" ]; then
+        echo -e "${RED}错误: save_mapping_config 参数不完整${NC}"
+        log_message "ERROR" "save_mapping_config 参数不完整: start=$start_port, end=$end_port, service=$service_port"
+        return 1
+    fi
+    
+    # 验证配置目录
+    if [ -z "$CONFIG_DIR" ]; then
+        echo -e "${RED}错误: CONFIG_DIR 未设置${NC}"
+        log_message "ERROR" "CONFIG_DIR 未设置"
+        return 1
+    fi
+    
+    # 确保配置目录存在
+    if ! mkdir -p "$CONFIG_DIR" 2>/dev/null; then
+        echo -e "${RED}错误: 无法创建配置目录: $CONFIG_DIR${NC}"
+        log_message "ERROR" "无法创建配置目录: $CONFIG_DIR"
+        return 1
+    fi
+    
+    local timestamp=$(date '+%Y%m%d_%H%M%S')
+    local config_file="$CONFIG_DIR/mappings.conf"
+    
+    # 尝试写入配置
+    if ! cat >> "$config_file" << EOF
 # 添加时间: $(date)
+# 协议: $protocol, IP版本: IPv$IP_VERSION
 MAPPING_${timestamp}_START=$start_port
 MAPPING_${timestamp}_END=$end_port
 MAPPING_${timestamp}_SERVICE=$service_port
+MAPPING_${timestamp}_PROTOCOL=$protocol
+MAPPING_${timestamp}_IP_VERSION=$IP_VERSION
+
 EOF
+    then
+        echo -e "${RED}错误: 无法写入配置文件: $config_file${NC}"
+        log_message "ERROR" "无法写入配置文件: $config_file"
+        return 1
+    fi
+    
+    # 验证写入是否成功
+    if [ ! -f "$config_file" ]; then
+        echo -e "${RED}错误: 配置文件创建失败: $config_file${NC}"
+        log_message "ERROR" "配置文件创建失败: $config_file"
+        return 1
+    fi
+    
+    log_message "INFO" "配置已保存: ${protocol^^} ${start_port}-${end_port} -> ${service_port}"
+    return 0
 }
 
 # --- 备份和恢复函数 ---
@@ -424,17 +757,16 @@ handle_iptables_error() {
 show_rules_for_version() {
     local ip_version=$1
     local total_rules=0
-    local iptables_cmd
-
-    if [ "$ip_version" = "6" ]; then
-        iptables_cmd="ip6tables"
-    else
-        iptables_cmd="iptables"
-    fi
-
+    
+    log_message "DEBUG" "显示 IPv${ip_version} 规则"
     echo -e "\n${YELLOW}--- IPv${ip_version} 规则 ---${NC}"
 
-    local rules=$($iptables_cmd -t nat -L PREROUTING -n --line-numbers 2>/dev/null)
+    # 使用缓存获取规则
+    local rules=$(cache_iptables_rules "$ip_version")
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}获取 IPv${ip_version} 规则失败${NC}"
+        return 0
+    fi
 
     if [ -z "$rules" ] || [[ $(echo "$rules" | wc -l) -le 2 ]]; then
         echo -e "${YELLOW}未找到 IPv${ip_version} 映射规则。${NC}"
@@ -445,7 +777,11 @@ show_rules_for_version() {
         "No." "Type" "Prot" "Source" "Destination" "PortRange" "DstPort" "From"
     echo "---------------------------------------------------------------------------------"
 
+    # 收集所有需要检查状态的端口信息
+    local ports_to_check=()
+    local rule_data=()
     local rule_count=0
+    
     while IFS= read -r rule; do
         if [[ "$rule" =~ ^Chain[[:space:]] ]] || [[ "$rule" =~ ^num[[:space:]] ]]; then
             continue
@@ -479,17 +815,39 @@ show_rules_for_version() {
             redirect_port=$(echo "$rule" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p')
         fi
 
+        # 存储规则数据
+        rule_data+=("$line_num|$target|$protocol|$source|$destination|$port_range|$redirect_port|$origin")
+        
+        # 收集端口检查信息
+        if [ -n "$redirect_port" ] && [ -n "$protocol" ]; then
+            ports_to_check+=("$redirect_port:$protocol")
+        fi
+        
+        ((rule_count++))
+    done <<< "$rules"
+
+    # 批量检查端口状态（性能优化）
+    local port_status_map=""
+    if [ ${#ports_to_check[@]} -gt 0 ]; then
+        log_message "DEBUG" "批量检查 ${#ports_to_check[@]} 个端口状态"
+        port_status_map=$(batch_check_port_status "${ports_to_check[@]}")
+    fi
+
+    # 显示规则
+    for rule_info in "${rule_data[@]}"; do
+        IFS='|' read -r line_num target protocol source destination port_range redirect_port origin <<< "$rule_info"
+        
         local status="🔴"
-        if check_rule_active "$port_range" "$redirect_port"; then
-            status="🟢"
+        if [ -n "$redirect_port" ] && [ -n "$protocol" ]; then
+            if echo "$port_status_map" | grep -q "^${redirect_port}:${protocol}:active$"; then
+                status="🟢"
+            fi
         fi
 
         printf "%-4s %-18s %-8s %-15s %-15s %-20s %-10s %-6s %s\n" \
             "$line_num" "$target" "$protocol" "$source" "$destination" \
             "$port_range" "$redirect_port" "$origin" "$status"
-
-        ((rule_count++))
-    done <<< "$rules"
+    done
 
     echo "---------------------------------------------------------------------------------"
     echo -e "${GREEN}共 $rule_count 条 IPv${ip_version} 规则 | 🟢=活跃 🔴=非活跃${NC}"
@@ -523,10 +881,17 @@ show_current_rules() {
 check_rule_active() {
     local port_range=$1
     local service_port=$2
+    local protocol=${3:-"udp"}  # 添加协议参数，默认为udp
     
-    # 检查服务端口是否在监听
-    if ss -ulnp | grep -q ":$service_port "; then
-        return 0
+    # 根据协议检查服务端口是否在监听
+    if [ "$protocol" = "tcp" ]; then
+        if ss -tlnp | grep -q ":$service_port "; then
+            return 0
+        fi
+    else
+        if ss -ulnp | grep -q ":$service_port "; then
+            return 0
+        fi
     fi
     return 1
 }
@@ -692,29 +1057,58 @@ add_mapping_rule() {
     local service_port=$3
     local protocol=${4:-udp}
     
+    # 验证环境变量
+    if ! validate_environment; then
+        echo -e "${RED}✗ 环境验证失败，无法继续${NC}"
+        return 1
+    fi
+    
     # 自动备份
+    local backup_file=""
     if [ "$AUTO_BACKUP" = true ]; then
         echo "正在备份当前规则..."
-        backup_rules
+        if backup_rules; then
+            backup_file="$BACKUP_DIR/iptables_backup_$(date +%Y%m%d_%H%M%S).rules"
+            log_message "INFO" "备份成功: $backup_file"
+        else
+            echo -e "${YELLOW}⚠ 备份失败，但继续执行${NC}"
+            log_message "WARNING" "规则备份失败"
+        fi
     fi
 
     echo "正在添加端口映射规则..."
     
     # 根据IP_VERSION获取对应的iptables命令
     local iptables_cmd=$(get_iptables_cmd)
+    if [ -z "$iptables_cmd" ]; then
+        echo -e "${RED}✗ 无法获取 iptables 命令${NC}"
+        log_message "ERROR" "无法获取 iptables 命令"
+        return 1
+    fi
 
-    echo "正在添加端口映射规则..."
+    # 验证 iptables 命令可用性
+    if ! command -v "$iptables_cmd" &>/dev/null; then
+        echo -e "${RED}✗ $iptables_cmd 命令不可用${NC}"
+        log_message "ERROR" "$iptables_cmd 命令不可用"
+        return 1
+    fi
 
     # 添加规则
-    if $iptables_cmd -t nat -A PREROUTING -p $protocol --dport "$start_port:$end_port" \
+    local rule_output
+    rule_output=$($iptables_cmd -t nat -A PREROUTING -p $protocol --dport "$start_port:$end_port" \
        -m comment --comment "$RULE_COMMENT" \
-       -j REDIRECT --to-port "$service_port" 2>/dev/null; then
-        
+       -j REDIRECT --to-port "$service_port" 2>&1)
+    local exit_code=$?
+    
+    if [ $exit_code -eq 0 ]; then
         echo -e "${GREEN}✓ 映射规则添加成功: ${protocol^^} ${start_port}-${end_port} -> ${service_port}${NC}"
         log_message "INFO" "添加规则: ${protocol^^} ${start_port}-${end_port} -> ${service_port}"
         
         # 保存配置
-        save_mapping_config "$start_port" "$end_port" "$service_port"
+        if ! save_mapping_config "$start_port" "$end_port" "$service_port" "$protocol"; then
+            echo -e "${YELLOW}⚠ 配置保存失败，但规则已生效${NC}"
+            log_message "WARNING" "配置保存失败"
+        fi
         
         # 显示规则状态
         show_current_rules
@@ -722,15 +1116,36 @@ add_mapping_rule() {
         # 询问是否永久保存
         read -p "是否将规则永久保存? (y/n): " save_choice
         if [[ "$save_choice" == "y" || "$save_choice" == "Y" ]]; then
-            save_rules
+            if ! save_rules; then
+                echo -e "${YELLOW}⚠ 永久保存失败，规则仅为临时规则${NC}"
+                log_message "WARNING" "规则永久保存失败"
+            fi
         else
             echo -e "${YELLOW}注意：规则仅为临时规则，重启后将失效。${NC}"
         fi
         
     else
-        local exit_code=$?
         echo -e "${RED}✗ 添加规则失败${NC}"
+        if [ -n "$rule_output" ]; then
+            echo -e "${RED}错误详情: $rule_output${NC}"
+            log_message "ERROR" "添加规则失败: $rule_output"
+        fi
         handle_iptables_error $exit_code "添加规则"
+        
+        # 如果有备份，询问是否恢复
+        if [ "$AUTO_BACKUP" = true ] && [ -n "$backup_file" ] && [ -f "$backup_file" ]; then
+            read -p "是否恢复到添加规则前的状态? (y/n): " restore_choice
+            if [[ "$restore_choice" =~ ^[Yy]$ ]]; then
+                if $iptables_cmd-restore < "$backup_file" 2>/dev/null; then
+                    echo -e "${GREEN}✓ 已恢复到备份状态${NC}"
+                    log_message "INFO" "已恢复到备份状态: $backup_file"
+                else
+                    echo -e "${RED}✗ 恢复备份失败${NC}"
+                    log_message "ERROR" "恢复备份失败: $backup_file"
+                fi
+            fi
+        fi
+        
         return $exit_code
     fi
 }
