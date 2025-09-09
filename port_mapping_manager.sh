@@ -38,18 +38,76 @@ log_message() {
     echo "[$timestamp] [$level] $message" | tee -a "$LOG_FILE" >/dev/null 2>&1
 }
 
-# 输入安全验证
+# 增强的输入安全验证
 sanitize_input() {
     local input="$1"
-    # 只允许数字、字母、短横线、下划线
-    echo "$input" | sed 's/[^a-zA-Z0-9._-]//g'
+    local type="${2:-default}"
+    
+    # 防止空输入和过长输入
+    if [ -z "$input" ] || [ ${#input} -gt 1000 ]; then
+        echo ""
+        return 1
+    fi
+    
+    case "$type" in
+        "port")
+            # 端口号：只允许1-5位数字
+            if echo "$input" | grep -qE '^[0-9]{1,5}$'; then
+                echo "$input"
+            else
+                echo ""
+                return 1
+            fi
+            ;;
+        "path")
+            # 文件路径：防止路径遍历攻击，移除危险字符
+            echo "$input" | sed 's/\.\.\///g' | sed 's/[;&|`$(){}[\]\\]//g' | sed 's/[^a-zA-Z0-9._/-]//g'
+            ;;
+        "filename")
+            # 文件名：只允许安全字符
+            echo "$input" | sed 's/[^a-zA-Z0-9._-]//g'
+            ;;
+        "protocol")
+            # 协议：只允许tcp或udp
+            case "$input" in
+                "tcp"|"TCP"|"1") echo "tcp" ;;
+                "udp"|"UDP"|"2") echo "udp" ;;
+                *) echo ""; return 1 ;;
+            esac
+            ;;
+        *)
+            # 默认：只允许字母、数字、点、下划线、短横线
+            echo "$input" | sed 's/[^a-zA-Z0-9._-]//g'
+            ;;
+    esac
 }
 
-# 创建必要的目录
+# 安全创建必要的目录和文件
 setup_directories() {
-    mkdir -p "$CONFIG_DIR" "$BACKUP_DIR" 2>/dev/null
-    touch "$LOG_FILE" 2>/dev/null
-    chmod 600 "$LOG_FILE" 2>/dev/null
+    # 创建目录时设置安全权限
+    if ! mkdir -p "$CONFIG_DIR" "$BACKUP_DIR" 2>/dev/null; then
+        echo -e "${RED}错误：无法创建配置目录${NC}"
+        log_message "ERROR" "无法创建配置目录: $CONFIG_DIR"
+        return 1
+    fi
+    
+    # 设置目录权限 - 只有root可以访问
+    chmod 700 "$CONFIG_DIR" "$BACKUP_DIR" 2>/dev/null
+    
+    # 创建日志文件
+    if ! touch "$LOG_FILE" 2>/dev/null; then
+        echo -e "${YELLOW}警告：无法创建日志文件 $LOG_FILE${NC}"
+    else
+        # 设置日志文件权限 - 只有root可以读写
+        chmod 600 "$LOG_FILE" 2>/dev/null
+    fi
+    
+    # 设置配置文件权限（如果存在）
+    if [ -f "$CONFIG_FILE" ]; then
+        chmod 600 "$CONFIG_FILE" 2>/dev/null
+    fi
+    
+    log_message "INFO" "目录和文件权限设置完成"
 }
 
 # --- 系统检测和兼容性函数 ---
@@ -205,28 +263,41 @@ install_dependencies() {
 
 # --- 增强的验证函数 ---
 
-# 端口验证函数
+# 增强的端口验证函数
 validate_port() {
     local port=$1
     local port_name=$2
     
-    # 输入清理
-    port=$(sanitize_input "$port")
+    # 使用增强的输入清理
+    port=$(sanitize_input "$port" "port")
     
-    if [[ ! "$port" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}错误：${port_name} 必须是纯数字。${NC}"
+    # 检查清理后的结果
+    if [ -z "$port" ]; then
+        echo -e "${RED}错误：${port_name} 格式无效，必须是1-5位纯数字。${NC}"
+        log_message "ERROR" "端口验证失败: $port_name 格式无效"
         return 1
     fi
     
+    # 数值范围检查
     if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
         echo -e "${RED}错误：${port_name} 必须在 1-65535 范围内。${NC}"
+        log_message "ERROR" "端口验证失败: $port_name 超出范围"
         return 1
     fi
     
     # 检查是否为系统保留端口
     if [ "$port" -lt 1024 ]; then
         echo -e "${YELLOW}警告：端口 $port 是系统保留端口，可能需要特殊权限。${NC}"
+        log_message "WARNING" "使用系统保留端口: $port"
     fi
+    
+    # 检查是否为常见危险端口
+    case "$port" in
+        22|23|25|53|80|110|143|443|993|995)
+            echo -e "${YELLOW}警告：端口 $port 是常用服务端口，请确认不会冲突。${NC}"
+            log_message "WARNING" "使用常用服务端口: $port"
+            ;;
+    esac
     
     return 0
 }
@@ -312,18 +383,48 @@ EOF
 
 # --- 备份和恢复函数 ---
 
-# 备份当前iptables规则
+# 安全备份当前iptables规则
 backup_rules() {
-    local backup_file="$BACKUP_DIR/iptables_backup_$(date +%Y%m%d_%H%M%S).rules"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_file="$BACKUP_DIR/iptables_backup_${timestamp}.rules"
     
-    if iptables-save > "$backup_file" 2>/dev/null; then
-        echo -e "${GREEN}✓ iptables规则已备份到: $backup_file${NC}"
-        log_message "INFO" "规则备份成功: $backup_file"
-        
-        # 清理旧备份（保留最新的10个）
-        cleanup_old_backups
-        return 0
+    # 验证备份目录存在且安全
+    if [ ! -d "$BACKUP_DIR" ]; then
+        echo -e "${RED}✗ 备份目录不存在${NC}"
+        log_message "ERROR" "备份目录不存在: $BACKUP_DIR"
+        return 1
+    fi
+    
+    # 创建临时文件进行安全备份
+    local temp_backup="${backup_file}.tmp"
+    
+    if iptables-save > "$temp_backup" 2>/dev/null; then
+        # 验证备份文件内容
+        if [ -s "$temp_backup" ] && head -1 "$temp_backup" | grep -q "^#"; then
+            # 原子性移动到最终位置
+            if mv "$temp_backup" "$backup_file" 2>/dev/null; then
+                # 设置安全权限 - 只有root可以读写
+                chmod 600 "$backup_file" 2>/dev/null
+                echo -e "${GREEN}✓ iptables规则已备份到: $backup_file${NC}"
+                log_message "INFO" "规则备份成功: $backup_file"
+                
+                # 清理旧备份（保留最新的10个）
+                cleanup_old_backups
+                return 0
+            else
+                rm -f "$temp_backup" 2>/dev/null
+                echo -e "${RED}✗ 备份文件移动失败${NC}"
+                log_message "ERROR" "备份文件移动失败"
+                return 1
+            fi
+        else
+            rm -f "$temp_backup" 2>/dev/null
+            echo -e "${RED}✗ 备份内容验证失败${NC}"
+            log_message "ERROR" "备份内容验证失败"
+            return 1
+        fi
     else
+        rm -f "$temp_backup" 2>/dev/null
         echo -e "${RED}✗ 备份失败${NC}"
         log_message "ERROR" "规则备份失败"
         return 1
@@ -685,33 +786,74 @@ setup_mapping() {
     done
 }
 
-# 添加映射规则的核心函数
+# 安全增强的映射规则添加函数
 add_mapping_rule() {
     local start_port=$1
     local end_port=$2
     local service_port=$3
     local protocol=${4:-udp}
     
+    # 严格的参数验证 - 防止命令注入
+    start_port=$(sanitize_input "$start_port" "port")
+    end_port=$(sanitize_input "$end_port" "port")
+    service_port=$(sanitize_input "$service_port" "port")
+    protocol=$(sanitize_input "$protocol" "protocol")
+    
+    # 验证清理后的参数
+    if [ -z "$start_port" ] || [ -z "$end_port" ] || [ -z "$service_port" ] || [ -z "$protocol" ]; then
+        echo -e "${RED}✗ 参数验证失败，存在无效输入${NC}"
+        log_message "ERROR" "add_mapping_rule: 参数验证失败"
+        return 1
+    fi
+    
+    # 二次验证端口范围
+    if ! validate_port "$start_port" "起始端口" || \
+       ! validate_port "$end_port" "终止端口" || \
+       ! validate_port "$service_port" "服务端口"; then
+        echo -e "${RED}✗ 端口验证失败${NC}"
+        log_message "ERROR" "add_mapping_rule: 端口验证失败"
+        return 1
+    fi
+    
     # 自动备份
     if [ "$AUTO_BACKUP" = true ]; then
         echo "正在备份当前规则..."
-        backup_rules
+        if ! backup_rules; then
+            echo -e "${YELLOW}警告：备份失败，是否继续? (y/n)${NC}"
+            read -r backup_continue
+            if [[ "$backup_continue" != "y" && "$backup_continue" != "Y" ]]; then
+                return 1
+            fi
+        fi
     fi
 
     echo "正在添加端口映射规则..."
     
-    # 根据IP_VERSION获取对应的iptables命令
-    local iptables_cmd=$(get_iptables_cmd)
+    # 安全获取iptables命令
+    local iptables_cmd
+    iptables_cmd=$(get_iptables_cmd)
+    if [ -z "$iptables_cmd" ]; then
+        echo -e "${RED}✗ 无法确定iptables命令${NC}"
+        log_message "ERROR" "add_mapping_rule: iptables命令获取失败"
+        return 1
+    fi
 
-    echo "正在添加端口映射规则..."
-
-    # 添加规则
-    if $iptables_cmd -t nat -A PREROUTING -p $protocol --dport "$start_port:$end_port" \
-       -m comment --comment "$RULE_COMMENT" \
-       -j REDIRECT --to-port "$service_port" 2>/dev/null; then
-        
+    # 构建安全的命令参数数组 - 防止命令注入
+    local cmd_args=(
+        "-t" "nat"
+        "-A" "PREROUTING"
+        "-p" "$protocol"
+        "--dport" "$start_port:$end_port"
+        "-m" "comment"
+        "--comment" "$RULE_COMMENT"
+        "-j" "REDIRECT"
+        "--to-port" "$service_port"
+    )
+    
+    # 安全执行命令
+    if "$iptables_cmd" "${cmd_args[@]}" 2>/dev/null; then
         echo -e "${GREEN}✓ 映射规则添加成功: ${protocol^^} ${start_port}-${end_port} -> ${service_port}${NC}"
-        log_message "INFO" "添加规则: ${protocol^^} ${start_port}-${end_port} -> ${service_port}"
+        log_message "INFO" "添加规则成功: ${protocol^^} ${start_port}-${end_port} -> ${service_port}"
         
         # 保存配置
         save_mapping_config "$start_port" "$end_port" "$service_port"
@@ -720,7 +862,9 @@ add_mapping_rule() {
         show_current_rules
         
         # 询问是否永久保存
-        read -p "是否将规则永久保存? (y/n): " save_choice
+        echo -n "是否将规则永久保存? (y/n): "
+        read -r save_choice
+        save_choice=$(sanitize_input "$save_choice")
         if [[ "$save_choice" == "y" || "$save_choice" == "Y" ]]; then
             save_rules
         else
@@ -730,6 +874,7 @@ add_mapping_rule() {
     else
         local exit_code=$?
         echo -e "${RED}✗ 添加规则失败${NC}"
+        log_message "ERROR" "添加规则失败: ${protocol^^} ${start_port}-${end_port} -> ${service_port}"
         handle_iptables_error $exit_code "添加规则"
         return $exit_code
     fi
@@ -1544,15 +1689,6 @@ create_restore_script() {
 # 端口映射规则恢复脚本
 # 由 Port Mapping Manager 自动生成
 
-LOG_FILE="/var/log/udp-port-mapping.log"
-
-log_message() {
-    local level=$1
-    local message=$2
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] [$level] $message" >> "$LOG_FILE" 2>/dev/null
-}
-
 echo "开始恢复 iptables 规则..."
 log_message "INFO" "开始恢复 iptables 规则"
 
@@ -1757,25 +1893,81 @@ EOF
 # --- 新增功能：批量操作 ---
 
 # 批量导入规则
+# 安全的批量导入规则函数
 batch_import_rules() {
     echo -e "${BLUE}批量导入规则${NC}"
     echo "请输入配置文件路径 (格式: start_port:end_port:service_port 每行一个):"
-    read -p "文件路径: " config_file
+    echo -n "文件路径: "
+    read -r config_file_input
     
+    # 安全清理文件路径
+    local config_file
+    config_file=$(sanitize_input "$config_file_input" "path")
+    
+    if [ -z "$config_file" ]; then
+        echo -e "${RED}无效的文件路径${NC}"
+        log_message "ERROR" "批量导入: 无效文件路径"
+        return 1
+    fi
+    
+    # 验证文件存在性和可读性
     if [ ! -f "$config_file" ]; then
         echo -e "${RED}文件不存在: $config_file${NC}"
+        log_message "ERROR" "批量导入: 文件不存在 $config_file"
+        return 1
+    fi
+    
+    if [ ! -r "$config_file" ]; then
+        echo -e "${RED}文件不可读: $config_file${NC}"
+        log_message "ERROR" "批量导入: 文件不可读 $config_file"
+        return 1
+    fi
+    
+    # 检查文件大小（防止过大文件攻击）
+    local file_size
+    file_size=$(stat -f%z "$config_file" 2>/dev/null || stat -c%s "$config_file" 2>/dev/null)
+    if [ -n "$file_size" ] && [ "$file_size" -gt 1048576 ]; then  # 1MB限制
+        echo -e "${RED}文件过大 (>1MB)，拒绝处理${NC}"
+        log_message "ERROR" "批量导入: 文件过大 $config_file"
+        return 1
+    fi
+    
+    # 检查文件内容安全性
+    if grep -q '[;&|`$(){}[\]\\]' "$config_file"; then
+        echo -e "${RED}文件包含危险字符，拒绝处理${NC}"
+        log_message "ERROR" "批量导入: 文件包含危险字符 $config_file"
         return 1
     fi
     
     local line_num=0
     local success_count=0
     local error_count=0
+    local max_lines=1000  # 限制最大行数
+    
+    echo "开始处理配置文件: $config_file"
     
     while IFS=':' read -r start_port end_port service_port; do
         ((line_num++))
         
+        # 限制处理行数
+        if [ $line_num -gt $max_lines ]; then
+            echo -e "${YELLOW}达到最大行数限制 ($max_lines)，停止处理${NC}"
+            break
+        fi
+        
         # 跳过空行和注释
-        [[ -z "$start_port" ]] || [[ "$start_port" =~ ^#.*$ ]] && continue
+        [[ -z "$start_port" ]] || [[ "$start_port" =~ ^[[:space:]]*#.*$ ]] && continue
+        
+        # 清理输入数据
+        start_port=$(sanitize_input "$start_port" "port")
+        end_port=$(sanitize_input "$end_port" "port")
+        service_port=$(sanitize_input "$service_port" "port")
+        
+        if [ -z "$start_port" ] || [ -z "$end_port" ] || [ -z "$service_port" ]; then
+            echo -e "${RED}第 $line_num 行包含无效字符，跳过${NC}"
+            ((error_count++))
+            continue
+        fi
         
         echo "处理第 $line_num 行: $start_port:$end_port:$service_port"
         
@@ -1783,7 +1975,14 @@ batch_import_rules() {
            validate_port "$end_port" "终止端口" && \
            validate_port "$service_port" "服务端口"; then
             
-            if add_mapping_rule "$start_port" "$end_port" "$service_port"; then
+            # 添加额外的逻辑验证
+            if [ "$start_port" -gt "$end_port" ]; then
+                echo -e "${RED}第 $line_num 行: 起始端口大于终止端口，跳过${NC}"
+                ((error_count++))
+                continue
+            fi
+            
+            if add_mapping_rule "$start_port" "$end_port" "$service_port" "udp"; then
                 ((success_count++))
             else
                 ((error_count++))
@@ -1792,10 +1991,16 @@ batch_import_rules() {
             echo -e "${RED}第 $line_num 行格式错误，跳过${NC}"
             ((error_count++))
         fi
+        
+        # 添加处理间隔，防止系统过载
+        if [ $((line_num % 10)) -eq 0 ]; then
+            sleep 0.1
+        fi
+        
     done < "$config_file"
     
     echo -e "${GREEN}批量导入完成: 成功 $success_count 条, 失败 $error_count 条${NC}"
-    log_message "INFO" "批量导入: 成功=$success_count, 失败=$error_count"
+    log_message "INFO" "批量导入完成: 文件=$config_file, 成功=$success_count, 失败=$error_count"
 }
 
 # 批量导出规则
