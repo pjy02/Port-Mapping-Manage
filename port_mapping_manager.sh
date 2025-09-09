@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# TCP/UDP端口映射管理脚本 Enhanced v3.3
+# TCP/UDP端口映射管理脚本 Enhanced v3.6
 # 适用于 Hysteria2 机场端口跳跃配置
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断等功能
 
