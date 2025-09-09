@@ -3735,34 +3735,53 @@ check_for_updates() {
     echo -e "${CYAN}最新版本: v${remote_version}${NC}"
     echo
     
-    # 版本比较函数
+    # 版本比较函数（改进的兼容性版本）
     version_compare() {
         local v1=$1 v2=$2
-        if [[ "$v1" == "$v2" ]]; then
+        if [ "$v1" = "$v2" ]; then
             echo "equal"
             return
         fi
         
-        local IFS=.
-        local i v1_parts=($v1) v2_parts=($v2)
+        # 使用更兼容的方式处理版本号
+        local v1_major v1_minor v1_patch
+        local v2_major v2_minor v2_patch
         
-        # 填充短版本号
-        while [ ${#v1_parts[@]} -lt ${#v2_parts[@]} ]; do
-            v1_parts+=("0")
-        done
-        while [ ${#v2_parts[@]} -lt ${#v1_parts[@]} ]; do
-            v2_parts+=("0")
-        done
+        # 解析版本号
+        v1_major=$(echo "$v1" | cut -d. -f1)
+        v1_minor=$(echo "$v1" | cut -d. -f2 2>/dev/null || echo "0")
+        v1_patch=$(echo "$v1" | cut -d. -f3 2>/dev/null || echo "0")
         
-        for ((i=0; i<${#v1_parts[@]}; i++)); do
-            if [[ ${v1_parts[i]} -lt ${v2_parts[i]} ]]; then
-                echo "older"
-                return
-            elif [[ ${v1_parts[i]} -gt ${v2_parts[i]} ]]; then
-                echo "newer"
-                return
-            fi
-        done
+        v2_major=$(echo "$v2" | cut -d. -f1)
+        v2_minor=$(echo "$v2" | cut -d. -f2 2>/dev/null || echo "0")
+        v2_patch=$(echo "$v2" | cut -d. -f3 2>/dev/null || echo "0")
+        
+        # 比较主版本号
+        if [ "$v1_major" -lt "$v2_major" ]; then
+            echo "older"
+            return
+        elif [ "$v1_major" -gt "$v2_major" ]; then
+            echo "newer"
+            return
+        fi
+        
+        # 比较次版本号
+        if [ "$v1_minor" -lt "$v2_minor" ]; then
+            echo "older"
+            return
+        elif [ "$v1_minor" -gt "$v2_minor" ]; then
+            echo "newer"
+            return
+        fi
+        
+        # 比较补丁版本号
+        if [ "$v1_patch" -lt "$v2_patch" ]; then
+            echo "older"
+            return
+        elif [ "$v1_patch" -gt "$v2_patch" ]; then
+            echo "newer"
+            return
+        fi
         
         echo "equal"
     }
@@ -3789,35 +3808,109 @@ check_for_updates() {
                 [yY]|[yY][eE][sS])
                     echo -e "${BLUE}正在下载更新...${NC}"
                     
-                    # 下载新版本脚本
-                    if ! curl -s "$SCRIPT_URL" > "$temp_script" 2>/dev/null; then
+                    # 下载新版本脚本（增强安全性）
+                    echo -e "${CYAN}正在从安全连接下载...${NC}"
+                    if ! curl -s --connect-timeout 10 --max-time 60 --fail \
+                        -H "User-Agent: Port-Mapping-Manager/$SCRIPT_VERSION" \
+                        -H "Accept: text/plain" \
+                        "$SCRIPT_URL" > "$temp_script" 2>/dev/null; then
                         echo -e "${RED}错误：下载更新失败${NC}"
+                        echo -e "${YELLOW}可能的原因：网络连接问题或服务器不可用${NC}"
                         rm -f "$temp_script"
                         return 1
                     fi
                     
-                    # 验证下载的脚本
-                    if [ ! -s "$temp_script" ] || ! grep -q "SCRIPT_VERSION=" "$temp_script"; then
-                        echo -e "${RED}错误：下载的脚本文件无效${NC}"
+                    # 增强的脚本验证
+                    echo -e "${CYAN}正在验证下载的文件...${NC}"
+                    
+                    # 检查文件大小（应该大于最小合理大小）
+                    local file_size=$(wc -c < "$temp_script" 2>/dev/null || echo "0")
+                    if [ "$file_size" -lt 10000 ]; then
+                        echo -e "${RED}错误：下载的文件太小，可能不完整${NC}"
                         rm -f "$temp_script"
                         return 1
                     fi
                     
-                    # 备份当前脚本
+                    # 验证脚本基本结构
+                    if [ ! -s "$temp_script" ] || \
+                       ! grep -q "SCRIPT_VERSION=" "$temp_script" || \
+                       ! grep -q "#!/bin/bash" "$temp_script" || \
+                       ! grep -q "Port-Mapping-Manage" "$temp_script"; then
+                        echo -e "${RED}错误：下载的脚本文件无效或损坏${NC}"
+                        rm -f "$temp_script"
+                        return 1
+                    fi
+                    
+                    # 验证下载的版本号
+                    local downloaded_version=$(grep "SCRIPT_VERSION=" "$temp_script" | cut -d'"' -f2 | head -1)
+                    if [ "$downloaded_version" != "$remote_version" ]; then
+                        echo -e "${YELLOW}警告：下载的版本号与预期不符${NC}"
+                        echo -e "${YELLOW}预期: v${remote_version}, 实际: v${downloaded_version}${NC}"
+                    fi
+                    
+                    echo -e "${GREEN}✓ 文件验证通过${NC}"
+                    
+                    # 备份当前脚本（增强错误处理）
                     local backup_path="$BACKUP_DIR/script_backup_$(date +%Y%m%d_%H%M%S).sh"
-                    cp "$0" "$backup_path"
+                    
+                    # 确保备份目录存在
+                    if [ ! -d "$BACKUP_DIR" ]; then
+                        if ! mkdir -p "$BACKUP_DIR" 2>/dev/null; then
+                            echo -e "${RED}错误：无法创建备份目录 $BACKUP_DIR${NC}"
+                            rm -f "$temp_script"
+                            return 1
+                        fi
+                    fi
+                    
+                    # 执行备份并验证
+                    if ! cp "$0" "$backup_path" 2>/dev/null; then
+                        echo -e "${RED}错误：备份当前脚本失败${NC}"
+                        rm -f "$temp_script"
+                        return 1
+                    fi
+                    
                     echo -e "${GREEN}✓ 当前脚本已备份到: $backup_path${NC}"
                     
-                    # 安装新版本
+                    # 安装新版本（改进的自更新机制）
+                    local current_version="$SCRIPT_VERSION"
+                    
+                    # 检查是否有足够权限修改脚本文件
+                    if [ ! -w "$0" ]; then
+                        echo -e "${RED}错误：没有权限修改脚本文件${NC}"
+                        echo -e "${YELLOW}请使用 sudo 运行或检查文件权限${NC}"
+                        rm -f "$temp_script"
+                        return 1
+                    fi
+                    
+                    # 使用更安全的方式替换脚本
+                    local temp_backup="${0}.updating.$$"
+                    if ! mv "$0" "$temp_backup" 2>/dev/null; then
+                        echo -e "${RED}错误：无法创建临时备份${NC}"
+                        rm -f "$temp_script"
+                        return 1
+                    fi
+                    
                     if mv "$temp_script" "$0" && chmod +x "$0"; then
+                        # 记录更新日志（使用正确的版本号）
+                        log_message "INFO" "脚本已从 v${current_version} 更新到 v${remote_version}"
+                        
+                        # 清理临时备份
+                        rm -f "$temp_backup" 2>/dev/null
+                        
                         echo -e "${GREEN}✓ 更新成功！${NC}"
-                        echo -e "${YELLOW}请重新运行脚本以使用新版本${NC}"
-                        log_message "INFO" "脚本已从 v${SCRIPT_VERSION} 更新到 v${remote_version}"
+                        echo -e "${YELLOW}脚本已从 v${current_version} 更新到 v${remote_version}${NC}"
+                        echo -e "${CYAN}请重新运行脚本以使用新版本功能${NC}"
                         exit 0
                     else
-                        echo -e "${RED}错误：更新失败${NC}"
-                        echo -e "${YELLOW}备份文件位置: $backup_path${NC}"
-                        rm -f "$temp_script"
+                        # 恢复原始脚本
+                        echo -e "${RED}错误：更新失败，正在恢复原始脚本...${NC}"
+                        if mv "$temp_backup" "$0" 2>/dev/null; then
+                            echo -e "${GREEN}✓ 原始脚本已恢复${NC}"
+                        else
+                            echo -e "${RED}严重错误：无法恢复原始脚本！${NC}"
+                            echo -e "${YELLOW}备份文件位置: $backup_path${NC}"
+                        fi
+                        rm -f "$temp_script" "$temp_backup" 2>/dev/null
                         return 1
                     fi
                     ;;
