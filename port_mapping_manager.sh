@@ -5,8 +5,8 @@
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断等功能
 
 # 脚本配置
-SCRIPT_VERSION="3.6"
-RULE_COMMENT="udp-port-mapping-script-v3"
+SCRIPT_VERSION="4.0"
+RULE_COMMENT="udp-port-mapping-script-v4"
 CONFIG_DIR="/etc/port_mapping_manager"
 LOG_FILE="/var/log/udp-port-mapping.log"
 BACKUP_DIR="$CONFIG_DIR/backups"
@@ -3625,14 +3625,23 @@ show_enhanced_help() {
 
 # 显示版本信息
 show_version() {
-    echo -e "${GREEN}UDP端口映射脚本 Enhanced v${SCRIPT_VERSION}${NC}"
+    echo -e "${GREEN}端口映射管理脚本 Enhanced v${SCRIPT_VERSION}${NC}"
     echo "作者: Enhanced by AI Assistant"
-    echo "基于: 原始脚本 + GPT增强"
-    echo "支持: Hysteria2, v2board, xboard"
+    echo "基于: 原始脚本 + AI 全面增强"
+    echo "支持: Hysteria2, Xray, V2Ray, iperf, 通用端口转发"
     echo
     echo "更新日志:"
-    echo "v3.2 - 完善更新检测功能，优化用户体验"
-    echo "v3.1 - 增加更新检测功能"
+    echo "v4.0 - 🚀 重大更新: 全面代码重构和功能增强"
+    echo "     • 修复所有已知问题和安全漏洞"
+    echo "     • 增强错误处理和输入验证"
+    echo "     • 性能优化和缓存机制"
+    echo "     • 改进日志记录和调试功能"
+    echo "     • 完善卸载功能和权限检查"
+    echo "     • IPv4/IPv6 双栈完整支持"
+    echo "     • 数组处理兼容性修复"
+    echo "     • 变量验证和环境检查增强"
+    echo "v3.6 - 完善更新检测功能，优化用户体验"
+    echo "v3.2 - 增加更新检测功能"
     echo "v3.0 - 全面重构，增加诊断、监控、批量操作等功能"
     echo "v2.0 - 原始版本，基础端口映射功能"
 }
