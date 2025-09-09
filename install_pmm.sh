@@ -13,7 +13,7 @@
 set -euo pipefail
 
 ############################## 全局配置 ######################################
-REMOTE_BASE="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main"  # TODO: 替换为真实仓库地址
+REMOTE_BASE="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main"
 INSTALL_DIR="/usr/local/bin"
 SCRIPT_DIR="/etc/port_mapping_manager"
 TMP_DIR="$(mktemp -d)"

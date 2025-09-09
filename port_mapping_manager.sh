@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# TCP/UDP端口映射管理脚本 Enhanced v3.3
+# TCP/UDP端口映射管理脚本 Enhanced v4.0
 # 适用于 Hysteria2 机场端口跳跃配置
-# 增强版本包含：安全性改进、错误处理、批量操作、监控诊断等功能
+# 增强版本包含：安全性改进、错误处理、批量操作、监控诊断、性能优化等功能
 
 # 脚本配置
 SCRIPT_VERSION="4.0"
@@ -34,6 +34,47 @@ IPTABLES_CACHE_TIMESTAMP=0
 IPTABLES_CACHE_TTL=30  # 缓存有效期30秒
 RULES_CACHE=""
 RULES_CACHE_TIMESTAMP=0
+
+# 临时文件跟踪数组
+TEMP_FILES=()
+
+# 信号处理器 - 清理临时文件
+cleanup_temp_files() {
+    local exit_code=${1:-0}
+    if [ ${#TEMP_FILES[@]} -gt 0 ]; then
+        log_message "INFO" "清理 ${#TEMP_FILES[@]} 个临时文件"
+        for temp_file in "${TEMP_FILES[@]}"; do
+            if [ -f "$temp_file" ]; then
+                rm -f "$temp_file" 2>/dev/null
+                log_message "DEBUG" "已清理临时文件: $temp_file"
+            fi
+        done
+        TEMP_FILES=()
+    fi
+    
+    # 清理缓存文件
+    if [ -n "$IPTABLES_CACHE_FILE" ] && [ -f "$IPTABLES_CACHE_FILE" ]; then
+        rm -f "$IPTABLES_CACHE_FILE" 2>/dev/null
+    fi
+    
+    # 如果是异常退出，记录日志
+    if [ "$exit_code" -ne 0 ]; then
+        log_message "WARNING" "脚本异常退出，已清理临时文件"
+    fi
+}
+
+# 注册临时文件
+register_temp_file() {
+    local temp_file="$1"
+    if [ -n "$temp_file" ]; then
+        TEMP_FILES+=("$temp_file")
+        log_message "DEBUG" "注册临时文件: $temp_file"
+    fi
+}
+
+# 设置信号处理器
+trap 'cleanup_temp_files 1; exit 1' INT TERM
+trap 'cleanup_temp_files 0' EXIT
 
 # --- 日志和安全函数 ---
 
@@ -232,10 +273,8 @@ cache_iptables_rules() {
     fi
     
     log_message "DEBUG" "刷新 iptables 规则缓存"
-    RULES_CACHE=$($iptables_cmd -t nat -L PREROUTING -n --line-numbers 2>/dev/null)
-    RULES_CACHE_TIMESTAMP=$current_time
-    
-    if [ $? -eq 0 ]; then
+    if RULES_CACHE=$($iptables_cmd -t nat -L PREROUTING -n --line-numbers 2>/dev/null); then
+        RULES_CACHE_TIMESTAMP=$current_time
         echo "$RULES_CACHE"
         return 0
     else
@@ -299,8 +338,8 @@ count_mapping_rules() {
     local ip_version=${1:-$IP_VERSION}
     
     # 尝试从缓存获取
-    local rules=$(cache_iptables_rules "$ip_version")
-    if [ $? -ne 0 ]; then
+    local rules
+    if ! rules=$(cache_iptables_rules "$ip_version"); then
         return 0
     fi
     
@@ -373,8 +412,9 @@ check_root() {
     if [ "$(id -u)" -ne 0 ]; then
         echo -e "${RED}错误：此脚本需要以 root 权限运行。${NC}"
         echo -e "请尝试使用: ${YELLOW}sudo $0${NC}"
-        exit 1
+        return 1
     fi
+    return 0
 }
 
 # 交互式清理备份文件
@@ -465,7 +505,7 @@ check_dependencies() {
     if ! $ipt_cmd -t nat -L >/dev/null 2>&1; then
         echo -e "${RED}错误：iptables NAT 功能不可用，可能需要加载内核模块。${NC}"
         echo -e "尝试执行: ${YELLOW}modprobe iptable_nat${NC}"
-        exit 1
+        return 1
     fi
 }
 
@@ -484,7 +524,7 @@ install_dependencies() {
             ;;
         *)
             echo -e "${RED}无法自动安装依赖，请手动安装：${deps[*]}${NC}"
-            exit 1
+            return 1
             ;;
     esac
 }
@@ -762,8 +802,8 @@ show_rules_for_version() {
     echo -e "\n${YELLOW}--- IPv${ip_version} 规则 ---${NC}"
 
     # 使用缓存获取规则
-    local rules=$(cache_iptables_rules "$ip_version")
-    if [ $? -ne 0 ]; then
+    local rules
+    if ! rules=$(cache_iptables_rules "$ip_version"); then
         echo -e "${RED}获取 IPv${ip_version} 规则失败${NC}"
         return 0
     fi
@@ -1979,7 +2019,7 @@ if [ -f "/etc/port_mapping_manager/current.rules.v4" ]; then
     else
         echo "✗ IPv4 规则恢复失败"
         log_message "ERROR" "IPv4 规则恢复失败"
-        exit 1
+        return 1
     fi
 else
     echo "- 未找到 IPv4 规则文件"
@@ -1994,7 +2034,7 @@ if [ -f "/etc/port_mapping_manager/current.rules.v6" ]; then
     else
         echo "✗ IPv6 规则恢复失败"
         log_message "ERROR" "IPv6 规则恢复失败"
-        exit 1
+        return 1
     fi
 else
     echo "- 未找到 IPv6 规则文件"
@@ -2458,7 +2498,10 @@ delete_specific_rule() {
     fi
 
     # 对应行号降序排序，避免删除时导致后续行号变化
-    sorted_rule_nums=( $(for sel in "${valid_choices[@]}"; do echo "${rules[$((sel-1))]}"; done | sort -nr) )
+    local sorted_rule_nums=()
+    while IFS= read -r rule_num; do
+        sorted_rule_nums+=("$rule_num")
+    done < <(for sel in "${valid_choices[@]}"; do echo "${rules[$((sel-1))]}"; done | sort -nr)
 
     if [ "$AUTO_BACKUP" = true ]; then
         backup_rules
@@ -3071,7 +3114,10 @@ complete_uninstall() {
     done
     
     # 去重并删除文件
-    local unique_paths=($(printf '%s\n' "${script_paths[@]}" | sort -u))
+    local unique_paths=()
+    while IFS= read -r path; do
+        unique_paths+=("$path")
+    done < <(printf '%s\n' "${script_paths[@]}" | sort -u)
     
     for p in "${unique_paths[@]}"; do 
         if [ -f "$p" ]; then
@@ -3129,6 +3175,7 @@ complete_uninstall() {
         
         # 创建临时清理脚本，使用安全的延迟删除
         local cleanup_script="/tmp/pmm_cleanup_$$.sh"
+        register_temp_file "$cleanup_script"
         cat > "$cleanup_script" << EOF
 #!/bin/bash
 # 临时清理脚本 - 自动生成
@@ -3671,6 +3718,10 @@ check_for_updates() {
     local temp_file="/tmp/pmm_update_check_$$"
     local temp_script="/tmp/pmm_script_update_$$"
     
+    # 注册临时文件以便自动清理
+    register_temp_file "$temp_file"
+    register_temp_file "$temp_script"
+    
     # 检查curl是否可用
     if ! command -v curl &> /dev/null; then
         echo -e "${RED}错误：curl 命令不可用，无法检查更新${NC}"
@@ -4076,10 +4127,19 @@ list_backups() {
 # 主程序初始化
 initialize_script() {
     # 基础检查
-    check_root
+    if ! check_root; then
+        echo -e "${RED}初始化失败：需要root权限${NC}"
+        return 1
+    fi
+    
     detect_system
     setup_directories
-    check_dependencies
+    
+    if ! check_dependencies; then
+        echo -e "${RED}初始化失败：依赖检查未通过${NC}"
+        return 1
+    fi
+    
     load_config
     
     # 记录启动
@@ -4185,8 +4245,7 @@ main() {
     main_loop
 }
 
-# 错误处理
-trap 'echo -e "\n${RED}脚本被中断${NC}"; log_message "WARNING" "脚本被用户中断"; exit 1' INT TERM
+
 
 # 启动脚本
 main "$@"
