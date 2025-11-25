@@ -35,12 +35,21 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/refs/heads/main/install_pmm.sh)
 ```
 
+> 如需自定义配置/备份/日志路径，可在启动时通过环境变量或参数覆盖，例如：
+>
+> ```bash
+> CONFIG_DIR=/data/pmm LOG_FILE=/var/log/pmm.log bash install_pmm.sh -- --config-dir /data/pmm
+> ```
+
 ### 可选启动参数
 
 | 参数 | 说明 |
 | ---- | ---- |
 | `-v, --verbose` | 显示更多调试信息 |
 | `--no-backup` | 禁用自动备份 |
+| `--config-dir <PATH>` / `CONFIG_DIR` | 指定配置目录 |
+| `--log-file <FILE>` / `LOG_FILE` | 指定日志文件 |
+| `--backup-dir <DIR>` / `BACKUP_DIR` | 指定备份目录 |
 | `-h, --help` | 查看帮助 |
 | `--version` | 显示脚本版本 |
 
