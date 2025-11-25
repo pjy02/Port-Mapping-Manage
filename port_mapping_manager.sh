@@ -22,6 +22,7 @@ else
     BACKUP_DIR="$CONFIG_DIR/backups"
 fi
 CONFIG_FILE="${CONFIG_FILE:-$CONFIG_DIR/config.conf}"
+AUTO_INSTALLED_FILE="$CONFIG_DIR/auto_installed_packages.list"
 
 # 颜色定义
 readonly GREEN='\033[0;32m'
@@ -3538,19 +3539,107 @@ cleanup_systemd_services() {
 # 清理netfilter-persistent状态
 cleanup_netfilter_persistent() {
     echo "正在清理 netfilter-persistent 状态..."
-    
+
     if command -v netfilter-persistent &>/dev/null; then
-        # 备份当前规则（可选）
+        local cleanup_success=true
+
         if [ -d "/etc/iptables" ]; then
             echo "  - 检测到 /etc/iptables 目录，可能包含 netfilter-persistent 配置"
-            echo "  - 注意：netfilter-persistent 的规则文件需要手动清理"
-            return 0
+            if [ -f "/etc/iptables/rules.v4" ] || [ -f "/etc/iptables/rules.v6" ]; then
+                read -p "  - 是否删除 /etc/iptables 规则文件以避免残留? (y/N): " clean_choice
+                if [[ "$clean_choice" =~ ^[Yy]$ ]]; then
+                    rm -f /etc/iptables/rules.v4 /etc/iptables/rules.v6 2>/dev/null || cleanup_success=false
+                    rmdir /etc/iptables 2>/dev/null || true
+                    if [ "$cleanup_success" = true ]; then
+                        echo "  - ✓ 已删除 netfilter-persistent 规则文件"
+                    else
+                        echo "  - ✗ 删除规则文件时遇到问题"
+                    fi
+                else
+                    echo "  - 已跳过删除 /etc/iptables 规则文件"
+                fi
+            else
+                echo "  - 未找到规则文件，跳过删除"
+            fi
         else
             echo "  - 未找到 /etc/iptables 目录"
-            return 1
         fi
+
+        $cleanup_success && return 0 || return 1
     else
         echo "  - netfilter-persistent 命令不可用"
+        return 0
+    fi
+}
+
+detect_package_manager() {
+    if command -v apt-get &>/dev/null; then
+        PACKAGE_MANAGER="apt"
+    elif command -v dnf &>/dev/null; then
+        PACKAGE_MANAGER="dnf"
+    elif command -v yum &>/dev/null; then
+        PACKAGE_MANAGER="yum"
+    elif command -v pacman &>/dev/null; then
+        PACKAGE_MANAGER="pacman"
+    else
+        PACKAGE_MANAGER="unknown"
+    fi
+}
+
+uninstall_packages() {
+    local pkgs=("$@")
+    [ ${#pkgs[@]} -eq 0 ] && return 0
+
+    case "$PACKAGE_MANAGER" in
+        apt)
+            apt-get remove -y "${pkgs[@]}" && apt-get autoremove -y ;;
+        yum|dnf)
+            $PACKAGE_MANAGER remove -y "${pkgs[@]}" ;;
+        pacman)
+            pacman -Rns --noconfirm "${pkgs[@]}" ;;
+        *)
+            echo "  - ✗ 未知包管理器，无法自动卸载依赖: ${pkgs[*]}"
+            return 1 ;;
+    esac
+}
+
+handle_auto_installed_packages() {
+    if [ ! -f "$AUTO_INSTALLED_FILE" ]; then
+        echo "  - 未找到自动安装依赖记录，跳过"
+        return 0
+    fi
+
+    local recorded_pm=""
+    recorded_pm=$(grep '^PACKAGE_MANAGER=' "$AUTO_INSTALLED_FILE" | cut -d'=' -f2- || true)
+    detect_package_manager
+    if [ -n "$recorded_pm" ]; then
+        PACKAGE_MANAGER="$recorded_pm"
+    fi
+
+    mapfile -t auto_packages < <(grep -v '^#' "$AUTO_INSTALLED_FILE" | grep -v '^PACKAGE_MANAGER=' | sed '/^$/d')
+    if [ ${#auto_packages[@]} -eq 0 ]; then
+        echo "  - 自动安装依赖列表为空，跳过"
+        return 0
+    fi
+
+    echo "  - 检测到安装脚本自动安装的依赖: ${auto_packages[*]}"
+    read -p "  - 是否卸载上述依赖? (y/N): " uninstall_choice
+    if [[ ! "$uninstall_choice" =~ ^[Yy]$ ]]; then
+        echo "  - 已跳过依赖卸载"
+        return 0
+    fi
+
+    if [ "$PACKAGE_MANAGER" = "unknown" ]; then
+        echo "  - ✗ 无法识别包管理器，请手动卸载: ${auto_packages[*]}"
+        return 1
+    fi
+
+    if uninstall_packages "${auto_packages[@]}"; then
+        echo "  - ✓ 已卸载自动安装的依赖"
+        rm -f "$AUTO_INSTALLED_FILE" 2>/dev/null || true
+        return 0
+    else
+        echo "  - ✗ 卸载依赖时出现问题"
         return 1
     fi
 }
@@ -3630,8 +3719,18 @@ complete_uninstall() {
         ((fail_count++))
     fi
     
-    # 4. 保存清理后的状态
-    echo "4. 保存系统状态..."
+    # 4. 处理自动安装的依赖
+    echo "4. 处理自动安装的依赖..."
+    if handle_auto_installed_packages; then
+        echo "  - ✓ 依赖清理步骤完成"
+        ((success_count++))
+    else
+        echo "  - ✗ 依赖清理步骤遇到问题"
+        ((fail_count++))
+    fi
+
+    # 5. 保存清理后的状态
+    echo "5. 保存系统状态..."
     if save_rules; then
         echo "  - ✓ 系统状态保存成功"
         ((success_count++))
@@ -3639,9 +3738,9 @@ complete_uninstall() {
         echo "  - ✗ 系统状态保存失败"
         ((fail_count++))
     fi
-    
-    # 5. 删除所有文件
-    echo "5. 删除所有文件..."
+
+    # 6. 删除所有文件
+    echo "6. 删除所有文件..."
     local files_success=true
     
     if [ -d "$BACKUP_DIR" ]; then
@@ -3686,8 +3785,8 @@ complete_uninstall() {
         ((fail_count++))
     fi
     
-    # 6. 删除脚本文件
-    echo "6. 删除脚本文件..."
+    # 7. 删除脚本文件
+    echo "7. 删除脚本文件..."
     local deleted_count=0
     local script_failed=false
     
