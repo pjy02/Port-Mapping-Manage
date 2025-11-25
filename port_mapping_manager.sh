@@ -111,7 +111,7 @@ log_message() {
     if [ -n "$LOG_FILE" ]; then
         echo "$log_entry" >> "$LOG_FILE" 2>/dev/null
     fi
-    
+
     # 根据级别和详细模式决定是否显示到控制台
     case "$level" in
         "ERROR"|"CRITICAL")
@@ -127,6 +127,9 @@ log_message() {
             [ "$VERBOSE_MODE" = true ] && echo -e "${CYAN}[$level] $message${NC}"
             ;;
     esac
+
+    # 确保在严格模式下返回成功，避免日志记录终止主流程
+    return 0
 }
 
 # 输入安全验证
