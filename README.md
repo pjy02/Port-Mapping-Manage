@@ -1,15 +1,15 @@
 # Port-Mapping-Manage
 
-[![Version](https://img.shields.io/badge/version-4.0-blue)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/port_mapping_manager.sh)
+[![Version](https://img.shields.io/badge/version-4.1-blue)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/port_mapping_manager.sh)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/LICENSE)
 
-> 🚀 **v4.0 重大更新** - 强大且易用的 iptables 端口映射管理脚本，支持 **TCP / UDP** 协议、IPv4/IPv6 双栈、批量操作、规则持久化、实时流量监控、智能诊断等企业级特性。
+> 🚀 **v4.1 重大更新** - 强大且易用的 iptables 端口映射管理脚本，支持 **TCP / UDP** 协议、IPv4/IPv6 双栈、批量操作、规则持久化、实时流量监控、智能诊断等企业级特性。
 
 ---
 
 ## 📑 项目简介
 
-本脚本旨在简化 Linux 服务器上的大范围端口转发配置与管理，特别适用于 **Hysteria2 / Xray / V2Ray / iperf** 等需要映射大量端口的应用场景。经过 v4.0 全面重构，现已成为功能完善、稳定可靠的企业级端口管理解决方案。
+本脚本旨在简化 Linux 服务器上的大范围端口转发配置与管理，特别适用于 **Hysteria2 / Xray / V2Ray / iperf** 等需要映射大量端口的应用场景。经过 v4.1 全面重构与持续优化，现已成为功能完善、稳定可靠的企业级端口管理解决方案。
 
 ### 🌟 核心特性
 
@@ -172,6 +172,16 @@ pmm --uninstall
 
 ## 📰 更新日志
 
+### v4.1 - ♻️ 维护更新 (2025-05-17)
+
+**🧰 功能增强**
+- ✅ 完全卸载流程新增依赖卸载提示与 netfilter-persistent 清理，避免残留配置
+- ✅ 卸载时增加无注释规则清理兜底，确保端口映射规则彻底移除
+
+**🌐 更新检查优化**
+- ✅ 根据仓库默认分支检查远程版本，并缓存快照减少重复下载
+- ✅ GitHub API 异常时提供回退和提示，提升更新检测的稳健性
+
 ### v4.0 - 🚀 重大更新 (2025-01-10)
 
 **🔧 核心修复与优化**
@@ -205,6 +215,8 @@ pmm --uninstall
 
 | 版本 | 变更 | 日期 |
 | ---- | ---- | ---- |
+| 4.1  | 完全卸载与更新检测优化 | 2025-05-17 |
+| 4.0  | 全面重构，增强稳定性与诊断能力 | 2025-01-10 |
 | 3.6  | 完善更新检测功能，优化用户体验 | 2025-08-15 |
 | 3.1  | 增加安装脚本依赖自动检测 | 2025-08-02 |
 | 3.0  | 全面重构，增加诊断与监控 | 2025-08-02 |
