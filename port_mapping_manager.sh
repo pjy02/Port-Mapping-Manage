@@ -46,6 +46,7 @@ IPTABLES_CACHE_TIMESTAMP=0
 IPTABLES_CACHE_TTL=30  # 缓存有效期30秒
 RULES_CACHE=""
 RULES_CACHE_TIMESTAMP=0
+LAST_RULE_COUNT=0
 
 # 临时文件跟踪数组
 TEMP_FILES=()
@@ -967,7 +968,9 @@ show_rules_for_version() {
     echo "---------------------------------------------------------------------------------"
     echo -e "${GREEN}共 $rule_count 条 IPv${ip_version} 规则 | 🟢=活跃 🔴=非活跃${NC}"
     
-    return $rule_count
+    LAST_RULE_COUNT=$rule_count
+
+    return 0
 }
 
 show_current_rules() {
@@ -979,10 +982,10 @@ show_current_rules() {
     local total_rules_v6=0
 
     show_rules_for_version "4"
-    total_rules_v4=$?
+    total_rules_v4=$LAST_RULE_COUNT
 
     show_rules_for_version "6"
-    total_rules_v6=$?
+    total_rules_v6=$LAST_RULE_COUNT
 
     if [ $((total_rules_v4 + total_rules_v6)) -eq 0 ]; then
         echo -e "${YELLOW}未找到任何由本脚本创建的映射规则。${NC}"
