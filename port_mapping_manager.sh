@@ -1,6 +1,8 @@
 #!/bin/bash
 
 # 启用严格模式：遇到错误、未定义变量或管道失败时立即退出，避免静默失败
+# 说明：展示/探测类命令在无匹配数据时可能合法返回非零，为避免影响主流程，
+# 已在对应位置使用 "|| true" 放宽，其他路径保持严格退出以暴露真实问题。
 set -euo pipefail
 
 # TCP/UDP端口映射管理脚本 Enhanced v4.2
@@ -86,8 +88,8 @@ register_temp_file() {
 }
 
 # 设置信号处理器
-trap 'cleanup_temp_files 1; exit 1' INT TERM
-trap 'cleanup_temp_files 0' EXIT
+trap 'exit_code=$?; cleanup_temp_files $exit_code; exit $exit_code' INT TERM
+trap 'cleanup_temp_files $?' EXIT
 
 # --- 日志和安全函数 ---
 
@@ -658,7 +660,7 @@ check_port_conflicts() {
     local iptables_cmd=$(get_iptables_cmd)
     
     # 检查现有iptables规则冲突
-    local conflicts=$($iptables_cmd -t nat -L PREROUTING -n | grep -E "dpt:($start_port|$end_port|$service_port)([^0-9]|$)")
+    local conflicts=$($iptables_cmd -t nat -L PREROUTING -n | grep -E "dpt:($start_port|$end_port|$service_port)([^0-9]|$)" || true)
     
     if [ -n "$conflicts" ]; then
         echo -e "${YELLOW}发现可能的端口冲突：${NC}"
@@ -1036,7 +1038,7 @@ show_traffic_stats() {
                     total_bytes=$((total_bytes + bytes))
                 fi
             fi
-        done < <($iptables_cmd -t nat -L PREROUTING -v -n 2>/dev/null)
+        done < <($iptables_cmd -t nat -L PREROUTING -v -n 2>/dev/null || true)
 
     if [ "$total_packets" -gt 0 ] || [ "$total_bytes" -gt 0 ]; then
         echo -e "${YELLOW}--- IPv${IP_VERSION} 流量 ---${NC}"
@@ -2413,7 +2415,7 @@ diagnose_system() {
     
     # 4. 端口监听状态
     echo -e "\n${CYAN}4. 服务端口监听状态:${NC}"
-    local service_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u))
+    local service_ports=($( { iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u; } 2>/dev/null || true))
     
     for port in "${service_ports[@]}"; do
         if ss -ulnp | grep -q ":$port "; then
@@ -2438,7 +2440,7 @@ diagnose_system() {
     
     # 6. 规则统计
     echo -e "\n${CYAN}6. 映射规则统计:${NC}"
-    local rule_count=$(iptables -t nat -L PREROUTING -n | grep -c "$RULE_COMMENT")
+    local rule_count=$(iptables -t nat -L PREROUTING -n | grep -c "$RULE_COMMENT" 2>/dev/null || echo "0")
     echo "活跃映射规则: $rule_count 条"
     
     if [ "$rule_count" -gt 0 ]; then
@@ -2487,7 +2489,7 @@ test_network_connectivity() {
     # 检查网络接口状态
     echo "网络接口状态:"
     if command -v ip &> /dev/null; then
-        local interfaces=$(ip link show | grep "state UP" | awk -F': ' '{print $2}' | head -3)
+        local interfaces=$( { ip link show | grep "state UP" | awk -F': ' '{print $2}' | head -3; } 2>/dev/null || true)
         if [ -n "$interfaces" ]; then
             echo "$interfaces" | while read -r interface; do
                 echo "✓ $interface: UP"
@@ -2507,7 +2509,7 @@ test_network_connectivity() {
     fi
     
     # 测试映射端口连通性
-    local service_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u | head -5))
+    local service_ports=($( { iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u | head -5; } 2>/dev/null || true))
     if [ ${#service_ports[@]} -gt 0 ]; then
         echo "端口连通性测试:"
         for port in "${service_ports[@]}"; do
@@ -2569,7 +2571,7 @@ check_security_status() {
     # 检查开放端口数量
     local open_ports_count=0
     if command -v ss &> /dev/null; then
-        open_ports_count=$(ss -tuln | grep -c "LISTEN")
+        open_ports_count=$(ss -tuln | grep -c "LISTEN" 2>/dev/null || echo "0")
         echo "监听端口总数: $open_ports_count"
         if [ "$open_ports_count" -gt 20 ]; then
             echo "⚠ 开放端口较多，建议检查是否都是必需的"
@@ -2577,7 +2579,7 @@ check_security_status() {
     fi
     
     # 检查映射端口范围
-    local mapped_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | grep -o "dpts:[0-9]*:[0-9]*" | cut -d: -f2-3))
+    local mapped_ports=($( { iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | grep -o "dpts:[0-9]*:[0-9]*" | cut -d: -f2-3; } 2>/dev/null || true))
     local high_risk_ports=0
     for port_range in "${mapped_ports[@]}"; do
         local start_port=$(echo "$port_range" | cut -d: -f1)
@@ -2625,13 +2627,13 @@ provide_troubleshooting_suggestions() {
         suggestions+=("加载NAT模块: modprobe iptable_nat")
     fi
     
-    local rule_count=$(iptables -t nat -L PREROUTING -n | grep -c "$RULE_COMMENT")
+    local rule_count=$(iptables -t nat -L PREROUTING -n | grep -c "$RULE_COMMENT" 2>/dev/null || echo "0")
     if [ "$rule_count" -eq 0 ]; then
         suggestions+=("当前无映射规则，使用选项1添加规则")
     fi
     
     # 检查服务监听
-    local service_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u))
+    local service_ports=($( { iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u; } 2>/dev/null || true))
     local unlistened_ports=()
     for port in "${service_ports[@]}"; do
         if ! ss -ulnp | grep -q ":$port "; then
