@@ -1,6 +1,6 @@
 # Port-Mapping-Manage
 
-[![Version](https://img.shields.io/badge/version-4.0-blue)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/port_mapping_manager.sh)
+[![Version](https://img.shields.io/badge/version-4.1-blue)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/port_mapping_manager.sh)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/LICENSE)
 
 > 🚀 **v4.0 重大更新** - 强大且易用的 iptables 端口映射管理脚本，支持 **TCP / UDP** 协议、IPv4/IPv6 双栈、批量操作、规则持久化、实时流量监控、智能诊断等企业级特性。
@@ -180,6 +180,13 @@ pmm --uninstall
 ---
 
 ## 📰 更新日志
+
+### v4.1 - 🔧 卸载体验改进 (2025-01-17)
+
+**🧹 依赖与清理优化**
+- ✅ 记录一键安装阶段自动补装的依赖，便于后续卸载选择性清理
+- ✅ 完全卸载时可选移除自动安装的包，并提示清理 netfilter-persistent 规则文件
+- ✅ 调整卸载流程，确保在删除配置前完成依赖回滚并反馈清理结果
 
 ### v4.0 - 🚀 重大更新 (2025-01-10)
 
