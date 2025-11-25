@@ -3291,60 +3291,86 @@ delete_rules_by_version() {
     local ip_version=$1
     local iptables_cmd
     local rule_comment="UDP_PORT_MAPPING"
-    
+    local operation_failed=false
+
     if [ -n "$RULE_COMMENT" ]; then
         rule_comment="$RULE_COMMENT"
     fi
-    
+
     if [ "$ip_version" = "6" ]; then
         iptables_cmd="ip6tables"
     else
         iptables_cmd="iptables"
     fi
-    
+
     echo "正在删除 IPv${ip_version} 规则..."
     echo "  - 调试: 使用规则注释: $rule_comment"
-    
+
     # 检查命令是否存在
     if ! command -v "$iptables_cmd" &>/dev/null; then
         echo "  - 错误: $iptables_cmd 命令不存在"
         return 1
     fi
-    
+
     # 使用更安全的规则删除方法（逐个删除，避免行号变化问题）
     local deleted_count=0
     local max_attempts=100  # 防止无限循环
     local attempts=0
-    
+
     echo "  - 开始删除 IPv${ip_version} 规则..."
-    
+
     while [ $attempts -lt $max_attempts ]; do
         # 获取第一个匹配的规则行号
-        local line_num=$($iptables_cmd -t nat -L PREROUTING --line-numbers 2>/dev/null | grep "$rule_comment" | head -1 | awk '{print $1}')
-        
+        local line_num
+        line_num=$($iptables_cmd -t nat -L PREROUTING --line-numbers 2>/dev/null | grep "$rule_comment" | head -1 | awk '{ print $1}')
+
         if [ -z "$line_num" ]; then
             echo "  - 没有更多 IPv${ip_version} 规则需要删除"
             break
         fi
-        
+
         echo "  - 尝试删除 IPv${ip_version} 规则 #$line_num"
         if $iptables_cmd -t nat -D PREROUTING "$line_num" 2>/dev/null; then
             echo "  - ✓ 成功删除 IPv${ip_version} 规则 #$line_num"
             ((deleted_count++))
         else
             echo "  - ✗ 删除 IPv${ip_version} 规则 #$line_num 失败"
+            operation_failed=true
             break
         fi
-        
+
         ((attempts++))
     done
-    
+
     if [ $attempts -eq $max_attempts ]; then
         echo "  - ⚠ 达到最大删除尝试次数，可能存在无法删除的规则"
+        operation_failed=true
     fi
-    
+
+    # 检测是否存在无注释的 DNAT 规则并提供兜底清理
+    local remaining_dnat
+    remaining_dnat=$($iptables_cmd -t nat -S PREROUTING 2>/dev/null | grep -c "DNAT")
+    if [ "$remaining_dnat" -gt 0 ]; then
+        echo "  - ⚠ 检测到 $remaining_dnat 条未使用脚本注释的 DNAT 规则"
+        read -p "  - 是否清空 PREROUTING 链以确保无残留? (y/N): " force_clear
+        if [[ "$force_clear" =~ ^[Yy]$ ]]; then
+            if $iptables_cmd -t nat -F PREROUTING 2>/dev/null; then
+                echo "  - ✓ 已清空 PREROUTING 链"
+            else
+                echo "  - ✗ 清空 PREROUTING 链失败"
+                operation_failed=true
+            fi
+        else
+            echo "  - 已跳过未标注规则的链清理"
+        fi
+    fi
+
     echo "  - 总计删除了 $deleted_count 条 IPv${ip_version} 规则"
-    return $deleted_count
+
+    if [ "$operation_failed" = true ]; then
+        return 1
+    fi
+    return 0
 }
 
 # 清理systemd服务
@@ -3464,19 +3490,142 @@ cleanup_systemd_services() {
 # 清理netfilter-persistent状态
 cleanup_netfilter_persistent() {
     echo "正在清理 netfilter-persistent 状态..."
-    
-    if command -v netfilter-persistent &>/dev/null; then
-        # 备份当前规则（可选）
-        if [ -d "/etc/iptables" ]; then
-            echo "  - 检测到 /etc/iptables 目录，可能包含 netfilter-persistent 配置"
-            echo "  - 注意：netfilter-persistent 的规则文件需要手动清理"
-            return 0
-        else
-            echo "  - 未找到 /etc/iptables 目录"
-            return 1
+
+    local cleaned_any=false
+    local operation_success=true
+
+    # 停止并禁用 netfilter-persistent 服务
+    if command -v systemctl &>/dev/null && systemctl list-unit-files netfilter-persistent.service &>/dev/null; then
+        cleaned_any=true
+        echo "  - 检查 netfilter-persistent.service"
+        if systemctl is-enabled netfilter-persistent.service &>/dev/null; then
+            systemctl disable netfilter-persistent.service 2>/dev/null && echo "  - ✓ 已禁用服务" || operation_success=false
         fi
+        if systemctl is-active netfilter-persistent.service &>/dev/null; then
+            systemctl stop netfilter-persistent.service 2>/dev/null && echo "  - ✓ 已停止服务" || operation_success=false
+        fi
+    fi
+
+    # 清理规则文件
+    if [ -d "/etc/iptables" ]; then
+        cleaned_any=true
+        for rule_file in /etc/iptables/rules.v4 /etc/iptables/rules.v6; do
+            if [ -f "$rule_file" ]; then
+                echo "  - 正在删除持久化规则文件: $rule_file"
+                if rm -f "$rule_file" 2>/dev/null; then
+                    echo "  - ✓ 已删除 $rule_file"
+                else
+                    echo "  - ✗ 删除 $rule_file 失败"
+                    operation_success=false
+                fi
+            fi
+        done
+
+        if [ -z "$(ls -A /etc/iptables 2>/dev/null)" ]; then
+            rmdir /etc/iptables 2>/dev/null && echo "  - ✓ 已移除空目录 /etc/iptables"
+        else
+            echo "  - /etc/iptables 中仍有其他文件，请按需手动处理"
+        fi
+    fi
+
+    # 如命令存在，刷新当前持久化状态
+    if command -v netfilter-persistent &>/dev/null; then
+        cleaned_any=true
+        if netfilter-persistent flush 2>/dev/null; then
+            echo "  - ✓ 已刷新 netfilter-persistent 状态"
+        else
+            echo "  - ✗ 刷新 netfilter-persistent 状态失败"
+            operation_success=false
+        fi
+    fi
+
+    if [ "$cleaned_any" = false ]; then
+        echo "  - 未找到 netfilter-persistent 相关文件或命令"
+        return 1
+    fi
+
+    if [ "$operation_success" = true ]; then
+        return 0
     else
-        echo "  - netfilter-persistent 命令不可用"
+        return 1
+    fi
+}
+
+# 判断包是否已安装
+is_package_installed() {
+    local pkg=$1
+    case $PACKAGE_MANAGER in
+        apt)
+            dpkg -s "$pkg" >/dev/null 2>&1 ;;
+        yum|dnf)
+            rpm -q "$pkg" >/dev/null 2>&1 ;;
+        pacman)
+            pacman -Q "$pkg" >/dev/null 2>&1 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+# 卸载指定包
+remove_package() {
+    local pkg=$1
+    case $PACKAGE_MANAGER in
+        apt)
+            apt-get remove -y "$pkg" >/dev/null 2>&1 ;;
+        yum|dnf)
+            $PACKAGE_MANAGER remove -y "$pkg" >/dev/null 2>&1 ;;
+        pacman)
+            pacman -Rns --noconfirm "$pkg" >/dev/null 2>&1 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+# 卸载安装时引入的依赖
+uninstall_dependencies() {
+    echo "正在卸载安装依赖..."
+
+    if [ "$PACKAGE_MANAGER" = "unknown" ]; then
+        echo "  - 未识别到包管理器，请手动检查并卸载 curl、iptables 等依赖"
+        return 1
+    fi
+
+    local removable_pkgs=("iptables-persistent" "netfilter-persistent" "iptables-services")
+    local installed=()
+
+    for pkg in "${removable_pkgs[@]}"; do
+        if is_package_installed "$pkg"; then
+            installed+=("$pkg")
+        fi
+    done
+
+    if [ ${#installed[@]} -eq 0 ]; then
+        echo "  - 未检测到需要卸载的可选依赖"
+        echo "  - 如需移除 curl 或 iptables 等基础组件，请根据系统情况手动处理"
+        return 1
+    fi
+
+    echo "  - 检测到可卸载依赖: ${installed[*]}"
+    read -p "  - 是否卸载上述依赖? (y/N): " remove_choice
+    if [[ ! "$remove_choice" =~ ^[Yy]$ ]]; then
+        echo "  - 已跳过依赖卸载，可自行通过包管理器手动移除"
+        return 1
+    fi
+
+    local uninstall_success=true
+    for pkg in "${installed[@]}"; do
+        echo "  - 正在卸载 $pkg ..."
+        if remove_package "$pkg"; then
+            echo "  - ✓ 已卸载 $pkg"
+        else
+            echo "  - ✗ 卸载 $pkg 失败，请手动检查"
+            uninstall_success=false
+        fi
+    done
+
+    if [ "$uninstall_success" = true ]; then
+        return 0
+    else
         return 1
     fi
 }
@@ -3492,6 +3641,7 @@ complete_uninstall() {
     echo "  ✓ 清理所有 systemd 服务"
     echo "  ✓ 删除配置文件、日志和备份"
     echo "  ✓ 删除脚本文件和快捷方式"
+    echo "  ✓ 可选卸载安装时的附加依赖"
     echo "  ✓ 尝试恢复系统到初始状态"
     echo
     echo -e "${RED}⚠ 此操作不可逆！所有数据将永久丢失！${NC}"
@@ -3686,8 +3836,17 @@ complete_uninstall() {
         echo "  - ✗ 脚本文件删除失败或无文件可删除"
         ((fail_count++))
     fi
-    
-    # 7. 删除当前脚本
+
+    # 7. 卸载安装依赖
+    echo "7. 卸载安装依赖..."
+    if uninstall_dependencies; then
+        echo "  - ✓ 可选依赖卸载步骤已完成"
+        ((success_count++))
+    else
+        echo "  - ⚠ 依赖卸载已跳过或需要手动处理"
+    fi
+
+    # 8. 删除当前脚本
     local current_script="$(realpath "$0" 2>/dev/null || echo "$0")"
     echo "  - 准备删除当前脚本: $current_script"
     
@@ -4255,10 +4414,13 @@ check_for_updates() {
     # 临时文件
     local temp_file="/tmp/pmm_update_check_$$"
     local temp_script="/tmp/pmm_script_update_$$"
-    
+    local remote_script_file="/tmp/pmm_remote_snapshot_$$"
+
     # 注册临时文件以便自动清理
     register_temp_file "$temp_file"
     register_temp_file "$temp_script"
+    register_temp_file "$remote_script_file"
+    register_temp_file "${temp_file}.headers"
     
     # 检查curl是否可用
     if ! command -v curl &> /dev/null; then
@@ -4267,49 +4429,47 @@ check_for_updates() {
         return 1
     fi
     
-    # 获取最新版本信息
-    if ! curl -s "$REPO_URL" > "$temp_file" 2>/dev/null; then
-        echo -e "${RED}错误：无法连接到更新服务器${NC}"
-        echo -e "${YELLOW}请检查网络连接或稍后重试${NC}"
-        rm -f "$temp_file"
-        return 1
-    fi
-    
-    # 调试：显示API响应内容的前几行（已禁用）
-    # echo -e "${YELLOW}调试信息：API响应内容${NC}"
-    # head -10 "$temp_file" 2>/dev/null | sed 's/^/  /'
-    # echo
-    
     # 解析版本信息 - 从仓库信息获取
     local remote_version=""
     local release_notes=""
     local default_branch=""
-    
+    local remote_branch="main"
+
     # 获取默认分支
-    if grep -q '"default_branch"' "$temp_file"; then
-        default_branch=$(grep -o '"default_branch": "[^"]*"' "$temp_file" | cut -d'"' -f4)
-        # echo -e "${YELLOW}调试：默认分支: $default_branch${NC}"
+    if curl -s -D "${temp_file}.headers" "$REPO_URL" > "$temp_file" 2>/dev/null; then
+        if grep -q '"default_branch"' "$temp_file"; then
+            default_branch=$(grep -o '"default_branch": "[^"]*"' "$temp_file" | cut -d'"' -f4)
+            [ -n "$default_branch" ] && remote_branch="$default_branch"
+        fi
+
+        # 处理 API 限流提示
+        if grep -qi "rate limit exceeded" "$temp_file"; then
+            echo -e "${YELLOW}警告：GitHub API 访问受限，已切换为直接拉取最新脚本${NC}"
+            remote_branch="main"
+        fi
+    else
+        echo -e "${YELLOW}警告：无法访问 GitHub API，将直接从默认分支检查更新${NC}"
     fi
-    
-    # 如果获取到了默认分支，尝试从该分支的脚本文件获取版本
-    if [ -n "$default_branch" ]; then
-        local branch_script_url="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/$default_branch/port_mapping_manager.sh"
-        # echo -e "${YELLOW}调试：尝试从分支脚本获取版本${NC}"
-        if curl -s "$branch_script_url" | grep -q "SCRIPT_VERSION="; then
-            remote_version=$(curl -s "$branch_script_url" | grep "SCRIPT_VERSION=" | cut -d'"' -f2 | head -1)
-            # echo -e "${YELLOW}调试：从分支脚本获取版本: $remote_version${NC}"
+
+    # 使用确定的分支尝试获取脚本快照（避免重复下载）
+    local branch_script_url="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/${remote_branch}/port_mapping_manager.sh"
+    if curl -s --connect-timeout 10 --max-time 30 --fail -L \
+        -H "User-Agent: Port-Mapping-Manager/$SCRIPT_VERSION" \
+        "$branch_script_url" -o "$remote_script_file" 2>/dev/null; then
+        if grep -q "SCRIPT_VERSION=" "$remote_script_file"; then
+            remote_version=$(grep "SCRIPT_VERSION=" "$remote_script_file" | cut -d'"' -f2 | head -1)
         fi
     fi
-    
-    # 清理临时文件
-    rm -f "$temp_file"
-    
-    # 如果从分支脚本获取失败，尝试从main分支直接获取
-    if [ -z "$remote_version" ]; then
-        # echo -e "${YELLOW}调试：尝试从main分支直接获取版本信息${NC}"
-        if curl -s "$SCRIPT_URL" | grep -q "SCRIPT_VERSION="; then
-            remote_version=$(curl -s "$SCRIPT_URL" | grep "SCRIPT_VERSION=" | cut -d'"' -f2 | head -1)
-            # echo -e "${YELLOW}调试：从main分支获取版本: $remote_version${NC}"
+
+    # 如果分支脚本拉取失败，降级到 main 分支
+    if [ -z "$remote_version" ] && [ "$remote_branch" != "main" ]; then
+        echo -e "${YELLOW}警告：无法从分支 ${remote_branch} 获取版本，尝试 main 分支${NC}"
+        if curl -s --connect-timeout 10 --max-time 30 --fail -L \
+            -H "User-Agent: Port-Mapping-Manager/$SCRIPT_VERSION" \
+            "$SCRIPT_URL" -o "$remote_script_file" 2>/dev/null; then
+            if grep -q "SCRIPT_VERSION=" "$remote_script_file"; then
+                remote_version=$(grep "SCRIPT_VERSION=" "$remote_script_file" | cut -d'"' -f2 | head -1)
+            fi
         fi
     fi
     
@@ -4408,17 +4568,28 @@ check_for_updates() {
             case $update_choice in
                 [yY]|[yY][eE][sS])
                     echo -e "${BLUE}正在下载更新...${NC}"
-                    
+
+                    # 若已获取远程脚本快照则复用，否则再下载一次
+                    if [ -s "$remote_script_file" ]; then
+                        cp "$remote_script_file" "$temp_script" 2>/dev/null || true
+                    fi
+
                     # 下载新版本脚本（增强安全性）
                     echo -e "${CYAN}正在从安全连接下载...${NC}"
-                    if ! curl -s --connect-timeout 10 --max-time 60 --fail \
-                        -H "User-Agent: Port-Mapping-Manager/$SCRIPT_VERSION" \
-                        -H "Accept: text/plain" \
-                        "$SCRIPT_URL" > "$temp_script" 2>/dev/null; then
-                        echo -e "${RED}错误：下载更新失败${NC}"
-                        echo -e "${YELLOW}可能的原因：网络连接问题或服务器不可用${NC}"
-                        rm -f "$temp_script"
-                        return 1
+                    if [ ! -s "$temp_script" ]; then
+                        local download_url="$branch_script_url"
+                        # 如果降级到 main 分支，则明确切换到 main
+                        [ -z "$remote_version" ] && download_url="$SCRIPT_URL"
+
+                        if ! curl -s --connect-timeout 10 --max-time 60 --fail -L \
+                            -H "User-Agent: Port-Mapping-Manager/$SCRIPT_VERSION" \
+                            -H "Accept: text/plain" \
+                            "$download_url" > "$temp_script" 2>/dev/null; then
+                            echo -e "${RED}错误：下载更新失败${NC}"
+                            echo -e "${YELLOW}可能的原因：网络连接问题或服务器不可用${NC}"
+                            rm -f "$temp_script"
+                            return 1
+                        fi
                     fi
                     
                     # 增强的脚本验证
