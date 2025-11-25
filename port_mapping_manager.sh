@@ -10,10 +10,18 @@ set -euo pipefail
 # 脚本配置
 SCRIPT_VERSION="4.0"
 RULE_COMMENT="udp-port-mapping-script-v4"
-CONFIG_DIR="/etc/port_mapping_manager"
-LOG_FILE="/var/log/udp-port-mapping.log"
-BACKUP_DIR="$CONFIG_DIR/backups"
-CONFIG_FILE="$CONFIG_DIR/config.conf"
+DEFAULT_CONFIG_DIR="/etc/port_mapping_manager"
+DEFAULT_LOG_FILE="/var/log/udp-port-mapping.log"
+CONFIG_DIR="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+LOG_FILE="${LOG_FILE:-$DEFAULT_LOG_FILE}"
+BACKUP_DIR_OVERRIDDEN=false
+if [ -n "${BACKUP_DIR+x}" ]; then
+    BACKUP_DIR="${BACKUP_DIR:-}"
+    BACKUP_DIR_OVERRIDDEN=true
+else
+    BACKUP_DIR="$CONFIG_DIR/backups"
+fi
+CONFIG_FILE="${CONFIG_FILE:-$CONFIG_DIR/config.conf}"
 
 # 颜色定义
 readonly GREEN='\033[0;32m'
@@ -149,6 +157,15 @@ sanitize_input() {
     esac
 }
 
+# 更新路径相关的派生变量
+refresh_path_variables() {
+    if [ "$BACKUP_DIR_OVERRIDDEN" = false ]; then
+        BACKUP_DIR="$CONFIG_DIR/backups"
+    fi
+
+    CONFIG_FILE="$CONFIG_DIR/config.conf"
+}
+
 # 验证环境变量和系统状态
 validate_environment() {
     local errors=0
@@ -251,6 +268,54 @@ validate_environment() {
     else
         log_message "ERROR" "环境验证失败，发现 $errors 个问题"
         return $errors
+    fi
+}
+
+# 路径存在性和权限校验
+validate_paths() {
+    local errors=0
+
+    if ! mkdir -p "$CONFIG_DIR" 2>/dev/null; then
+        echo -e "${RED}错误: 无法创建配置目录: $CONFIG_DIR${NC}"
+        log_message "ERROR" "无法创建配置目录: $CONFIG_DIR"
+        ((errors++))
+    elif [ ! -w "$CONFIG_DIR" ]; then
+        echo -e "${RED}错误: 配置目录不可写: $CONFIG_DIR${NC}"
+        log_message "ERROR" "配置目录不可写: $CONFIG_DIR"
+        ((errors++))
+    fi
+
+    if ! mkdir -p "$BACKUP_DIR" 2>/dev/null; then
+        echo -e "${RED}错误: 无法创建备份目录: $BACKUP_DIR${NC}"
+        log_message "ERROR" "无法创建备份目录: $BACKUP_DIR"
+        ((errors++))
+    elif [ ! -w "$BACKUP_DIR" ]; then
+        echo -e "${RED}错误: 备份目录不可写: $BACKUP_DIR${NC}"
+        log_message "ERROR" "备份目录不可写: $BACKUP_DIR"
+        ((errors++))
+    fi
+
+    local log_dir
+    log_dir=$(dirname "$LOG_FILE")
+    if ! mkdir -p "$log_dir" 2>/dev/null; then
+        echo -e "${RED}错误: 无法创建日志目录: $log_dir${NC}"
+        log_message "ERROR" "无法创建日志目录: $log_dir"
+        ((errors++))
+    elif ! touch "$LOG_FILE" 2>/dev/null; then
+        echo -e "${RED}错误: 无法写入日志文件: $LOG_FILE${NC}"
+        log_message "ERROR" "无法写入日志文件: $LOG_FILE"
+        ((errors++))
+    else
+        chmod 600 "$LOG_FILE" 2>/dev/null || true
+    fi
+
+    if [ $errors -eq 0 ]; then
+        log_message "INFO" "配置目录已验证: $CONFIG_DIR"
+        log_message "INFO" "备份目录已验证: $BACKUP_DIR"
+        log_message "INFO" "日志文件已验证: $LOG_FILE"
+        return 0
+    else
+        return 1
     fi
 }
 
@@ -4206,6 +4271,9 @@ show_enhanced_help() {
     echo -e "${CYAN}🔧 命令行参数:${NC}"
     echo "--verbose, -v     : 启用详细输出模式"
     echo "--no-backup      : 跳过自动备份"
+    echo "--config-dir PATH: 指定配置目录 (或设置 CONFIG_DIR 环境变量)"
+    echo "--log-file  FILE : 指定日志文件 (或设置 LOG_FILE 环境变量)"
+    echo "--backup-dir DIR : 指定备份目录 (或设置 BACKUP_DIR 环境变量)"
     echo "--ip-version 4|6 : 指定 IP 版本"
     echo "--help, -h       : 显示帮助信息"
     echo
@@ -4681,6 +4749,12 @@ initialize_script() {
     fi
     
     detect_system
+
+    if ! validate_paths; then
+        echo -e "${RED}初始化失败：路径校验未通过${NC}"
+        return 1
+    fi
+
     setup_directories
     
     if ! check_dependencies; then
@@ -4773,6 +4847,31 @@ while [[ $# -gt 0 ]]; do
             AUTO_BACKUP=false
             shift
             ;;
+        --config-dir)
+            if [ $# -lt 2 ]; then
+                echo "错误: --config-dir 需要参数"
+                exit 1
+            fi
+            CONFIG_DIR="$2"
+            shift 2
+            ;;
+        --log-file)
+            if [ $# -lt 2 ]; then
+                echo "错误: --log-file 需要参数"
+                exit 1
+            fi
+            LOG_FILE="$2"
+            shift 2
+            ;;
+        --backup-dir)
+            if [ $# -lt 2 ]; then
+                echo "错误: --backup-dir 需要参数"
+                exit 1
+            fi
+            BACKUP_DIR="$2"
+            BACKUP_DIR_OVERRIDDEN=true
+            shift 2
+            ;;
         --uninstall)
             uninstall_script
             ;;
@@ -4783,6 +4882,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+refresh_path_variables
 
 # 主程序执行
 main() {
