@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# 启用严格模式：遇到错误、未定义变量或管道失败时立即退出，避免静默失败
+set -euo pipefail
+
 # TCP/UDP端口映射管理脚本 Enhanced v4.0
 # 适用于 Hysteria2 机场端口跳跃配置
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断、性能优化等功能
@@ -421,7 +424,8 @@ check_root() {
 interactive_cleanup_backups() {
     # 使用更兼容的方式处理文件列表
     local backup_files
-    backup_files=$(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null)
+    # 允许备份目录为空时静默继续，避免严格模式因 ls 返回非零退出
+    backup_files=$(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null || true)
     
     if [ -z "$backup_files" ]; then
         echo -e "${YELLOW}未找到备份文件${NC}"
@@ -706,11 +710,12 @@ backup_rules() {
 # 清理旧备份
 cleanup_old_backups() {
     local max_backups=${MAX_BACKUPS:-10}
-    local backup_count=$(ls -1 "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null | wc -l)
-    
+    # 允许备份目录为空时继续，避免因 ls 返回非零退出
+    local backup_count=$( { ls -1 "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null || true; } | wc -l)
+
     if [ "$backup_count" -gt "$max_backups" ]; then
         local excess=$((backup_count - max_backups))
-        ls -1t "$BACKUP_DIR"/iptables_backup_*.rules | tail -n "$excess" | xargs rm -f
+        { ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null || true; } | tail -n "$excess" | xargs rm -f
         log_message "INFO" "清理了 $excess 个旧备份文件"
     fi
 }
@@ -718,7 +723,8 @@ cleanup_old_backups() {
 # 恢复规则
 restore_from_backup() {
     echo -e "${BLUE}可用的备份文件：${NC}"
-    local backups=($(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null))
+    # 允许在没有备份时返回空数组而不触发退出
+    local backups=($(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null || true))
     
     if [ ${#backups[@]} -eq 0 ]; then
         echo -e "${YELLOW}未找到备份文件。${NC}"
@@ -1224,8 +1230,9 @@ create_systemd_service() {
     # 检查并清理可能存在的旧服务
     if [ -f "$service_file" ]; then
         echo "正在清理旧的 systemd 服务..."
-        systemctl disable udp-port-mapping.service 2>/dev/null
-        systemctl stop udp-port-mapping.service 2>/dev/null
+        # 已存在的服务可能未启用/未运行，允许这些命令返回非零避免严格模式中断
+        systemctl disable udp-port-mapping.service 2>/dev/null || true
+        systemctl stop udp-port-mapping.service 2>/dev/null || true
         rm -f "$service_file"
         systemctl daemon-reload
     fi
@@ -1876,7 +1883,8 @@ test_persistence_config() {
     while iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -q "$RULE_COMMENT"; do
         local line_num=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep "$RULE_COMMENT" | head -1 | awk '{print $1}')
         if [ -n "$line_num" ]; then
-            iptables -t nat -D PREROUTING "$line_num" 2>/dev/null
+            # 并发修改或提前删除时该命令可能返回非零，忽略以继续清理流程
+            iptables -t nat -D PREROUTING "$line_num" 2>/dev/null || true
             ((deleted_count++))
         else
             break
@@ -2102,8 +2110,9 @@ setup_systemd_service() {
     # 检查并清理可能存在的旧服务
     if [ -f "$service_file" ]; then
         echo "正在清理旧的 systemd 服务..."
-        systemctl disable iptables-restore.service 2>/dev/null
-        systemctl stop iptables-restore.service 2>/dev/null
+        # 旧服务可能不存在或未启用，防止在严格模式下因返回非零而退出
+        systemctl disable iptables-restore.service 2>/dev/null || true
+        systemctl stop iptables-restore.service 2>/dev/null || true
         rm -f "$service_file"
         systemctl daemon-reload
     fi
@@ -4647,7 +4656,8 @@ show_backup_menu() {
 # 列出备份文件
 list_backups() {
     echo -e "${BLUE}可用备份文件:${NC}"
-    local backups=($(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null))
+    # 列表可能为空，允许 ls 返回非零以保持严格模式下的兼容性
+    local backups=($(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null || true))
     
     if [ ${#backups[@]} -eq 0 ]; then
         echo -e "${YELLOW}未找到备份文件${NC}"
