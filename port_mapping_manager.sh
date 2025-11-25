@@ -3,12 +3,12 @@
 # 启用严格模式：遇到错误、未定义变量或管道失败时立即退出，避免静默失败
 set -euo pipefail
 
-# TCP/UDP端口映射管理脚本 Enhanced v4.1
+# TCP/UDP端口映射管理脚本 Enhanced v4.2
 # 适用于 Hysteria2 机场端口跳跃配置
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断、性能优化等功能
 
 # 脚本配置
-SCRIPT_VERSION="4.1"
+SCRIPT_VERSION="4.2"
 RULE_COMMENT="udp-port-mapping-script-v4"
 DEFAULT_CONFIG_DIR="/etc/port_mapping_manager"
 DEFAULT_LOG_FILE="/var/log/udp-port-mapping.log"
@@ -4424,70 +4424,42 @@ check_for_updates() {
     echo -e "${BLUE}正在检查更新...${NC}"
     
     # GitHub仓库信息
-    local REPO_URL="https://api.github.com/repos/pjy02/Port-Mapping-Manage"
     local SCRIPT_URL="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main/port_mapping_manager.sh"
     local INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main/install_pmm.sh"
-    
+
     # 临时文件
-    local temp_file="/tmp/pmm_update_check_$$"
     local temp_script="/tmp/pmm_script_update_$$"
-    
+
     # 注册临时文件以便自动清理
-    register_temp_file "$temp_file"
     register_temp_file "$temp_script"
-    
+
     # 检查curl是否可用
     if ! command -v curl &> /dev/null; then
         echo -e "${RED}错误：curl 命令不可用，无法检查更新${NC}"
         echo -e "${YELLOW}请手动安装 curl 后重试${NC}"
         return 1
     fi
-    
-    # 获取最新版本信息
-    if ! curl -s "$REPO_URL" > "$temp_file" 2>/dev/null; then
+
+    # 下载远程脚本副本（同时用于版本检查与后续更新），减少重复请求
+    if ! curl -s --fail --connect-timeout 10 --max-time 60 \
+        -H "User-Agent: Port-Mapping-Manager/$SCRIPT_VERSION" \
+        -H "Accept: text/plain" \
+        "$SCRIPT_URL" -o "$temp_script" 2>/dev/null; then
         echo -e "${RED}错误：无法连接到更新服务器${NC}"
         echo -e "${YELLOW}请检查网络连接或稍后重试${NC}"
-        rm -f "$temp_file"
         return 1
     fi
-    
-    # 调试：显示API响应内容的前几行（已禁用）
-    # echo -e "${YELLOW}调试信息：API响应内容${NC}"
-    # head -10 "$temp_file" 2>/dev/null | sed 's/^/  /'
-    # echo
-    
-    # 解析版本信息 - 从仓库信息获取
+
+    # 验证下载的脚本副本，以免误解析无效内容
+    if [ ! -s "$temp_script" ] || ! grep -q "SCRIPT_VERSION=" "$temp_script"; then
+        echo -e "${RED}错误：无法获取远程版本信息${NC}"
+        echo -e "${YELLOW}远程文件缺失或返回了无效内容${NC}"
+        return 1
+    fi
+
+    # 解析版本信息
     local remote_version=""
-    local release_notes=""
-    local default_branch=""
-    
-    # 获取默认分支
-    if grep -q '"default_branch"' "$temp_file"; then
-        default_branch=$(grep -o '"default_branch": "[^"]*"' "$temp_file" | cut -d'"' -f4)
-        # echo -e "${YELLOW}调试：默认分支: $default_branch${NC}"
-    fi
-    
-    # 如果获取到了默认分支，尝试从该分支的脚本文件获取版本
-    if [ -n "$default_branch" ]; then
-        local branch_script_url="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/$default_branch/port_mapping_manager.sh"
-        # echo -e "${YELLOW}调试：尝试从分支脚本获取版本${NC}"
-        if curl -s "$branch_script_url" | grep -q "SCRIPT_VERSION="; then
-            remote_version=$(curl -s "$branch_script_url" | grep "SCRIPT_VERSION=" | cut -d'"' -f2 | head -1)
-            # echo -e "${YELLOW}调试：从分支脚本获取版本: $remote_version${NC}"
-        fi
-    fi
-    
-    # 清理临时文件
-    rm -f "$temp_file"
-    
-    # 如果从分支脚本获取失败，尝试从main分支直接获取
-    if [ -z "$remote_version" ]; then
-        # echo -e "${YELLOW}调试：尝试从main分支直接获取版本信息${NC}"
-        if curl -s "$SCRIPT_URL" | grep -q "SCRIPT_VERSION="; then
-            remote_version=$(curl -s "$SCRIPT_URL" | grep "SCRIPT_VERSION=" | cut -d'"' -f2 | head -1)
-            # echo -e "${YELLOW}调试：从main分支获取版本: $remote_version${NC}"
-        fi
-    fi
+    remote_version=$(grep "SCRIPT_VERSION=" "$temp_script" | cut -d'"' -f2 | head -1)
     
     # 检查是否成功获取版本信息
     if [ -z "$remote_version" ]; then
@@ -4583,23 +4555,11 @@ check_for_updates() {
             read -p "是否要更新到最新版本? [y/N]: " update_choice
             case $update_choice in
                 [yY]|[yY][eE][sS])
-                    echo -e "${BLUE}正在下载更新...${NC}"
-                    
-                    # 下载新版本脚本（增强安全性）
-                    echo -e "${CYAN}正在从安全连接下载...${NC}"
-                    if ! curl -s --connect-timeout 10 --max-time 60 --fail \
-                        -H "User-Agent: Port-Mapping-Manager/$SCRIPT_VERSION" \
-                        -H "Accept: text/plain" \
-                        "$SCRIPT_URL" > "$temp_script" 2>/dev/null; then
-                        echo -e "${RED}错误：下载更新失败${NC}"
-                        echo -e "${YELLOW}可能的原因：网络连接问题或服务器不可用${NC}"
-                        rm -f "$temp_script"
-                        return 1
-                    fi
-                    
-                    # 增强的脚本验证
+                    echo -e "${BLUE}使用已下载的远程脚本进行更新...${NC}"
+
+                    # 增强的脚本验证（重复使用先前下载的文件，避免额外请求）
                     echo -e "${CYAN}正在验证下载的文件...${NC}"
-                    
+
                     # 检查文件大小（应该大于最小合理大小）
                     local file_size=$(wc -c < "$temp_script" 2>/dev/null || echo "0")
                     if [ "$file_size" -lt 10000 ]; then
@@ -4607,7 +4567,7 @@ check_for_updates() {
                         rm -f "$temp_script"
                         return 1
                     fi
-                    
+
                     # 验证脚本基本结构
                     if [ ! -s "$temp_script" ] || \
                        ! grep -q "SCRIPT_VERSION=" "$temp_script" || \
@@ -4617,16 +4577,16 @@ check_for_updates() {
                         rm -f "$temp_script"
                         return 1
                     fi
-                    
+
                     # 验证下载的版本号
                     local downloaded_version=$(grep "SCRIPT_VERSION=" "$temp_script" | cut -d'"' -f2 | head -1)
                     if [ "$downloaded_version" != "$remote_version" ]; then
                         echo -e "${YELLOW}警告：下载的版本号与预期不符${NC}"
                         echo -e "${YELLOW}预期: v${remote_version}, 实际: v${downloaded_version}${NC}"
                     fi
-                    
+
                     echo -e "${GREEN}✓ 文件验证通过${NC}"
-                    
+
                     # 备份当前脚本（增强错误处理）
                     local backup_path="$BACKUP_DIR/script_backup_$(date +%Y%m%d_%H%M%S).sh"
                     
