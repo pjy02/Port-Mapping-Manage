@@ -1,6 +1,6 @@
 # Port-Mapping-Manage
 
-[![Version](https://img.shields.io/badge/version-4.2-blue)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/port_mapping_manager.sh)
+[![Version](https://img.shields.io/badge/version-4.0-blue)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/port_mapping_manager.sh)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/LICENSE)
 
 > 🚀 **v4.0 重大更新** - 强大且易用的 iptables 端口映射管理脚本，支持 **TCP / UDP** 协议、IPv4/IPv6 双栈、批量操作、规则持久化、实时流量监控、智能诊断等企业级特性。
@@ -35,21 +35,12 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/refs/heads/main/install_pmm.sh)
 ```
 
-> 如需自定义配置/备份/日志路径，可在启动时通过环境变量或参数覆盖，例如：
->
-> ```bash
-> CONFIG_DIR=/data/pmm LOG_FILE=/var/log/pmm.log bash install_pmm.sh -- --config-dir /data/pmm
-> ```
-
 ### 可选启动参数
 
 | 参数 | 说明 |
 | ---- | ---- |
 | `-v, --verbose` | 显示更多调试信息 |
 | `--no-backup` | 禁用自动备份 |
-| `--config-dir <PATH>` / `CONFIG_DIR` | 指定配置目录 |
-| `--log-file <FILE>` / `LOG_FILE` | 指定日志文件 |
-| `--backup-dir <DIR>` / `BACKUP_DIR` | 指定备份目录 |
 | `-h, --help` | 查看帮助 |
 | `--version` | 显示脚本版本 |
 
@@ -180,19 +171,6 @@ pmm --uninstall
 ---
 
 ## 📰 更新日志
-
-### v4.2 - 🔄 更新检测优化 (2025-01-18)
-
-**🚀 体验与安全**
-- ✅ 更新检测仅下载一次远程脚本并复用解析，减少重复网络请求
-- ✅ 下载后先校验脚本有效性，再参与版本比对与自更新，提升可靠性
-
-### v4.1 - 🔧 卸载体验改进 (2025-01-17)
-
-**🧹 依赖与清理优化**
-- ✅ 记录一键安装阶段自动补装的依赖，便于后续卸载选择性清理
-- ✅ 完全卸载时可选移除自动安装的包，并提示清理 netfilter-persistent 规则文件
-- ✅ 调整卸载流程，确保在删除配置前完成依赖回滚并反馈清理结果
 
 ### v4.0 - 🚀 重大更新 (2025-01-10)
 

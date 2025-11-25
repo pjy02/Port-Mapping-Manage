@@ -1,30 +1,16 @@
 #!/bin/bash
 
-# 启用严格模式：遇到错误、未定义变量或管道失败时立即退出，避免静默失败
-# 说明：展示/探测类命令在无匹配数据时可能合法返回非零，为避免影响主流程，
-# 已在对应位置使用 "|| true" 放宽，其他路径保持严格退出以暴露真实问题。
-set -euo pipefail
-
-# TCP/UDP端口映射管理脚本 Enhanced v4.2
+# TCP/UDP端口映射管理脚本 Enhanced v4.0
 # 适用于 Hysteria2 机场端口跳跃配置
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断、性能优化等功能
 
 # 脚本配置
-SCRIPT_VERSION="4.2"
+SCRIPT_VERSION="4.0"
 RULE_COMMENT="udp-port-mapping-script-v4"
-DEFAULT_CONFIG_DIR="/etc/port_mapping_manager"
-DEFAULT_LOG_FILE="/var/log/udp-port-mapping.log"
-CONFIG_DIR="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
-LOG_FILE="${LOG_FILE:-$DEFAULT_LOG_FILE}"
-BACKUP_DIR_OVERRIDDEN=false
-if [ -n "${BACKUP_DIR+x}" ]; then
-    BACKUP_DIR="${BACKUP_DIR:-}"
-    BACKUP_DIR_OVERRIDDEN=true
-else
-    BACKUP_DIR="$CONFIG_DIR/backups"
-fi
-CONFIG_FILE="${CONFIG_FILE:-$CONFIG_DIR/config.conf}"
-AUTO_INSTALLED_FILE="$CONFIG_DIR/auto_installed_packages.list"
+CONFIG_DIR="/etc/port_mapping_manager"
+LOG_FILE="/var/log/udp-port-mapping.log"
+BACKUP_DIR="$CONFIG_DIR/backups"
+CONFIG_FILE="$CONFIG_DIR/config.conf"
 
 # 颜色定义
 readonly GREEN='\033[0;32m'
@@ -48,7 +34,6 @@ IPTABLES_CACHE_TIMESTAMP=0
 IPTABLES_CACHE_TTL=30  # 缓存有效期30秒
 RULES_CACHE=""
 RULES_CACHE_TIMESTAMP=0
-LAST_RULE_COUNT=0
 
 # 临时文件跟踪数组
 TEMP_FILES=()
@@ -88,8 +73,8 @@ register_temp_file() {
 }
 
 # 设置信号处理器
-trap 'exit_code=$?; cleanup_temp_files $exit_code; exit $exit_code' INT TERM
-trap 'cleanup_temp_files $?' EXIT
+trap 'cleanup_temp_files 1; exit 1' INT TERM
+trap 'cleanup_temp_files 0' EXIT
 
 # --- 日志和安全函数 ---
 
@@ -114,7 +99,7 @@ log_message() {
     if [ -n "$LOG_FILE" ]; then
         echo "$log_entry" >> "$LOG_FILE" 2>/dev/null
     fi
-
+    
     # 根据级别和详细模式决定是否显示到控制台
     case "$level" in
         "ERROR"|"CRITICAL")
@@ -130,9 +115,6 @@ log_message() {
             [ "$VERBOSE_MODE" = true ] && echo -e "${CYAN}[$level] $message${NC}"
             ;;
     esac
-
-    # 确保在严格模式下返回成功，避免日志记录终止主流程
-    return 0
 }
 
 # 输入安全验证
@@ -162,15 +144,6 @@ sanitize_input() {
             echo "$input" | sed 's/[^a-zA-Z0-9._-]//g'
             ;;
     esac
-}
-
-# 更新路径相关的派生变量
-refresh_path_variables() {
-    if [ "$BACKUP_DIR_OVERRIDDEN" = false ]; then
-        BACKUP_DIR="$CONFIG_DIR/backups"
-    fi
-
-    CONFIG_FILE="$CONFIG_DIR/config.conf"
 }
 
 # 验证环境变量和系统状态
@@ -275,54 +248,6 @@ validate_environment() {
     else
         log_message "ERROR" "环境验证失败，发现 $errors 个问题"
         return $errors
-    fi
-}
-
-# 路径存在性和权限校验
-validate_paths() {
-    local errors=0
-
-    if ! mkdir -p "$CONFIG_DIR" 2>/dev/null; then
-        echo -e "${RED}错误: 无法创建配置目录: $CONFIG_DIR${NC}"
-        log_message "ERROR" "无法创建配置目录: $CONFIG_DIR"
-        ((errors++))
-    elif [ ! -w "$CONFIG_DIR" ]; then
-        echo -e "${RED}错误: 配置目录不可写: $CONFIG_DIR${NC}"
-        log_message "ERROR" "配置目录不可写: $CONFIG_DIR"
-        ((errors++))
-    fi
-
-    if ! mkdir -p "$BACKUP_DIR" 2>/dev/null; then
-        echo -e "${RED}错误: 无法创建备份目录: $BACKUP_DIR${NC}"
-        log_message "ERROR" "无法创建备份目录: $BACKUP_DIR"
-        ((errors++))
-    elif [ ! -w "$BACKUP_DIR" ]; then
-        echo -e "${RED}错误: 备份目录不可写: $BACKUP_DIR${NC}"
-        log_message "ERROR" "备份目录不可写: $BACKUP_DIR"
-        ((errors++))
-    fi
-
-    local log_dir
-    log_dir=$(dirname "$LOG_FILE")
-    if ! mkdir -p "$log_dir" 2>/dev/null; then
-        echo -e "${RED}错误: 无法创建日志目录: $log_dir${NC}"
-        log_message "ERROR" "无法创建日志目录: $log_dir"
-        ((errors++))
-    elif ! touch "$LOG_FILE" 2>/dev/null; then
-        echo -e "${RED}错误: 无法写入日志文件: $LOG_FILE${NC}"
-        log_message "ERROR" "无法写入日志文件: $LOG_FILE"
-        ((errors++))
-    else
-        chmod 600 "$LOG_FILE" 2>/dev/null || true
-    fi
-
-    if [ $errors -eq 0 ]; then
-        log_message "INFO" "配置目录已验证: $CONFIG_DIR"
-        log_message "INFO" "备份目录已验证: $BACKUP_DIR"
-        log_message "INFO" "日志文件已验证: $LOG_FILE"
-        return 0
-    else
-        return 1
     fi
 }
 
@@ -496,8 +421,7 @@ check_root() {
 interactive_cleanup_backups() {
     # 使用更兼容的方式处理文件列表
     local backup_files
-    # 允许备份目录为空时静默继续，避免严格模式因 ls 返回非零退出
-    backup_files=$(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null || true)
+    backup_files=$(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null)
     
     if [ -z "$backup_files" ]; then
         echo -e "${YELLOW}未找到备份文件${NC}"
@@ -660,7 +584,7 @@ check_port_conflicts() {
     local iptables_cmd=$(get_iptables_cmd)
     
     # 检查现有iptables规则冲突
-    local conflicts=$($iptables_cmd -t nat -L PREROUTING -n | grep -E "dpt:($start_port|$end_port|$service_port)([^0-9]|$)" || true)
+    local conflicts=$($iptables_cmd -t nat -L PREROUTING -n | grep -E "dpt:($start_port|$end_port|$service_port)([^0-9]|$)")
     
     if [ -n "$conflicts" ]; then
         echo -e "${YELLOW}发现可能的端口冲突：${NC}"
@@ -782,12 +706,11 @@ backup_rules() {
 # 清理旧备份
 cleanup_old_backups() {
     local max_backups=${MAX_BACKUPS:-10}
-    # 允许备份目录为空时继续，避免因 ls 返回非零退出
-    local backup_count=$( { ls -1 "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null || true; } | wc -l)
-
+    local backup_count=$(ls -1 "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null | wc -l)
+    
     if [ "$backup_count" -gt "$max_backups" ]; then
         local excess=$((backup_count - max_backups))
-        { ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null || true; } | tail -n "$excess" | xargs rm -f
+        ls -1t "$BACKUP_DIR"/iptables_backup_*.rules | tail -n "$excess" | xargs rm -f
         log_message "INFO" "清理了 $excess 个旧备份文件"
     fi
 }
@@ -795,8 +718,7 @@ cleanup_old_backups() {
 # 恢复规则
 restore_from_backup() {
     echo -e "${BLUE}可用的备份文件：${NC}"
-    # 允许在没有备份时返回空数组而不触发退出
-    local backups=($(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null || true))
+    local backups=($(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null))
     
     if [ ${#backups[@]} -eq 0 ]; then
         echo -e "${YELLOW}未找到备份文件。${NC}"
@@ -970,9 +892,7 @@ show_rules_for_version() {
     echo "---------------------------------------------------------------------------------"
     echo -e "${GREEN}共 $rule_count 条 IPv${ip_version} 规则 | 🟢=活跃 🔴=非活跃${NC}"
     
-    LAST_RULE_COUNT=$rule_count
-
-    return 0
+    return $rule_count
 }
 
 show_current_rules() {
@@ -984,10 +904,10 @@ show_current_rules() {
     local total_rules_v6=0
 
     show_rules_for_version "4"
-    total_rules_v4=$LAST_RULE_COUNT
+    total_rules_v4=$?
 
     show_rules_for_version "6"
-    total_rules_v6=$LAST_RULE_COUNT
+    total_rules_v6=$?
 
     if [ $((total_rules_v4 + total_rules_v6)) -eq 0 ]; then
         echo -e "${YELLOW}未找到任何由本脚本创建的映射规则。${NC}"
@@ -1038,7 +958,7 @@ show_traffic_stats() {
                     total_bytes=$((total_bytes + bytes))
                 fi
             fi
-        done < <($iptables_cmd -t nat -L PREROUTING -v -n 2>/dev/null || true)
+        done < <($iptables_cmd -t nat -L PREROUTING -v -n 2>/dev/null)
 
     if [ "$total_packets" -gt 0 ] || [ "$total_bytes" -gt 0 ]; then
         echo -e "${YELLOW}--- IPv${IP_VERSION} 流量 ---${NC}"
@@ -1304,9 +1224,8 @@ create_systemd_service() {
     # 检查并清理可能存在的旧服务
     if [ -f "$service_file" ]; then
         echo "正在清理旧的 systemd 服务..."
-        # 已存在的服务可能未启用/未运行，允许这些命令返回非零避免严格模式中断
-        systemctl disable udp-port-mapping.service 2>/dev/null || true
-        systemctl stop udp-port-mapping.service 2>/dev/null || true
+        systemctl disable udp-port-mapping.service 2>/dev/null
+        systemctl stop udp-port-mapping.service 2>/dev/null
         rm -f "$service_file"
         systemctl daemon-reload
     fi
@@ -1957,8 +1876,7 @@ test_persistence_config() {
     while iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -q "$RULE_COMMENT"; do
         local line_num=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep "$RULE_COMMENT" | head -1 | awk '{print $1}')
         if [ -n "$line_num" ]; then
-            # 并发修改或提前删除时该命令可能返回非零，忽略以继续清理流程
-            iptables -t nat -D PREROUTING "$line_num" 2>/dev/null || true
+            iptables -t nat -D PREROUTING "$line_num" 2>/dev/null
             ((deleted_count++))
         else
             break
@@ -2184,9 +2102,8 @@ setup_systemd_service() {
     # 检查并清理可能存在的旧服务
     if [ -f "$service_file" ]; then
         echo "正在清理旧的 systemd 服务..."
-        # 旧服务可能不存在或未启用，防止在严格模式下因返回非零而退出
-        systemctl disable iptables-restore.service 2>/dev/null || true
-        systemctl stop iptables-restore.service 2>/dev/null || true
+        systemctl disable iptables-restore.service 2>/dev/null
+        systemctl stop iptables-restore.service 2>/dev/null
         rm -f "$service_file"
         systemctl daemon-reload
     fi
@@ -2415,7 +2332,7 @@ diagnose_system() {
     
     # 4. 端口监听状态
     echo -e "\n${CYAN}4. 服务端口监听状态:${NC}"
-    local service_ports=($( { iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u; } 2>/dev/null || true))
+    local service_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u))
     
     for port in "${service_ports[@]}"; do
         if ss -ulnp | grep -q ":$port "; then
@@ -2440,7 +2357,7 @@ diagnose_system() {
     
     # 6. 规则统计
     echo -e "\n${CYAN}6. 映射规则统计:${NC}"
-    local rule_count=$(iptables -t nat -L PREROUTING -n | grep -c "$RULE_COMMENT" 2>/dev/null || echo "0")
+    local rule_count=$(iptables -t nat -L PREROUTING -n | grep -c "$RULE_COMMENT")
     echo "活跃映射规则: $rule_count 条"
     
     if [ "$rule_count" -gt 0 ]; then
@@ -2489,7 +2406,7 @@ test_network_connectivity() {
     # 检查网络接口状态
     echo "网络接口状态:"
     if command -v ip &> /dev/null; then
-        local interfaces=$( { ip link show | grep "state UP" | awk -F': ' '{print $2}' | head -3; } 2>/dev/null || true)
+        local interfaces=$(ip link show | grep "state UP" | awk -F': ' '{print $2}' | head -3)
         if [ -n "$interfaces" ]; then
             echo "$interfaces" | while read -r interface; do
                 echo "✓ $interface: UP"
@@ -2509,7 +2426,7 @@ test_network_connectivity() {
     fi
     
     # 测试映射端口连通性
-    local service_ports=($( { iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u | head -5; } 2>/dev/null || true))
+    local service_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u | head -5))
     if [ ${#service_ports[@]} -gt 0 ]; then
         echo "端口连通性测试:"
         for port in "${service_ports[@]}"; do
@@ -2571,7 +2488,7 @@ check_security_status() {
     # 检查开放端口数量
     local open_ports_count=0
     if command -v ss &> /dev/null; then
-        open_ports_count=$(ss -tuln | grep -c "LISTEN" 2>/dev/null || echo "0")
+        open_ports_count=$(ss -tuln | grep -c "LISTEN")
         echo "监听端口总数: $open_ports_count"
         if [ "$open_ports_count" -gt 20 ]; then
             echo "⚠ 开放端口较多，建议检查是否都是必需的"
@@ -2579,7 +2496,7 @@ check_security_status() {
     fi
     
     # 检查映射端口范围
-    local mapped_ports=($( { iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | grep -o "dpts:[0-9]*:[0-9]*" | cut -d: -f2-3; } 2>/dev/null || true))
+    local mapped_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | grep -o "dpts:[0-9]*:[0-9]*" | cut -d: -f2-3))
     local high_risk_ports=0
     for port_range in "${mapped_ports[@]}"; do
         local start_port=$(echo "$port_range" | cut -d: -f1)
@@ -2627,13 +2544,13 @@ provide_troubleshooting_suggestions() {
         suggestions+=("加载NAT模块: modprobe iptable_nat")
     fi
     
-    local rule_count=$(iptables -t nat -L PREROUTING -n | grep -c "$RULE_COMMENT" 2>/dev/null || echo "0")
+    local rule_count=$(iptables -t nat -L PREROUTING -n | grep -c "$RULE_COMMENT")
     if [ "$rule_count" -eq 0 ]; then
         suggestions+=("当前无映射规则，使用选项1添加规则")
     fi
     
     # 检查服务监听
-    local service_ports=($( { iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u; } 2>/dev/null || true))
+    local service_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u))
     local unlistened_ports=()
     for port in "${service_ports[@]}"; do
         if ! ss -ulnp | grep -q ":$port "; then
@@ -3547,107 +3464,19 @@ cleanup_systemd_services() {
 # 清理netfilter-persistent状态
 cleanup_netfilter_persistent() {
     echo "正在清理 netfilter-persistent 状态..."
-
+    
     if command -v netfilter-persistent &>/dev/null; then
-        local cleanup_success=true
-
+        # 备份当前规则（可选）
         if [ -d "/etc/iptables" ]; then
             echo "  - 检测到 /etc/iptables 目录，可能包含 netfilter-persistent 配置"
-            if [ -f "/etc/iptables/rules.v4" ] || [ -f "/etc/iptables/rules.v6" ]; then
-                read -p "  - 是否删除 /etc/iptables 规则文件以避免残留? (y/N): " clean_choice
-                if [[ "$clean_choice" =~ ^[Yy]$ ]]; then
-                    rm -f /etc/iptables/rules.v4 /etc/iptables/rules.v6 2>/dev/null || cleanup_success=false
-                    rmdir /etc/iptables 2>/dev/null || true
-                    if [ "$cleanup_success" = true ]; then
-                        echo "  - ✓ 已删除 netfilter-persistent 规则文件"
-                    else
-                        echo "  - ✗ 删除规则文件时遇到问题"
-                    fi
-                else
-                    echo "  - 已跳过删除 /etc/iptables 规则文件"
-                fi
-            else
-                echo "  - 未找到规则文件，跳过删除"
-            fi
+            echo "  - 注意：netfilter-persistent 的规则文件需要手动清理"
+            return 0
         else
             echo "  - 未找到 /etc/iptables 目录"
+            return 1
         fi
-
-        $cleanup_success && return 0 || return 1
     else
         echo "  - netfilter-persistent 命令不可用"
-        return 0
-    fi
-}
-
-detect_package_manager() {
-    if command -v apt-get &>/dev/null; then
-        PACKAGE_MANAGER="apt"
-    elif command -v dnf &>/dev/null; then
-        PACKAGE_MANAGER="dnf"
-    elif command -v yum &>/dev/null; then
-        PACKAGE_MANAGER="yum"
-    elif command -v pacman &>/dev/null; then
-        PACKAGE_MANAGER="pacman"
-    else
-        PACKAGE_MANAGER="unknown"
-    fi
-}
-
-uninstall_packages() {
-    local pkgs=("$@")
-    [ ${#pkgs[@]} -eq 0 ] && return 0
-
-    case "$PACKAGE_MANAGER" in
-        apt)
-            apt-get remove -y "${pkgs[@]}" && apt-get autoremove -y ;;
-        yum|dnf)
-            $PACKAGE_MANAGER remove -y "${pkgs[@]}" ;;
-        pacman)
-            pacman -Rns --noconfirm "${pkgs[@]}" ;;
-        *)
-            echo "  - ✗ 未知包管理器，无法自动卸载依赖: ${pkgs[*]}"
-            return 1 ;;
-    esac
-}
-
-handle_auto_installed_packages() {
-    if [ ! -f "$AUTO_INSTALLED_FILE" ]; then
-        echo "  - 未找到自动安装依赖记录，跳过"
-        return 0
-    fi
-
-    local recorded_pm=""
-    recorded_pm=$(grep '^PACKAGE_MANAGER=' "$AUTO_INSTALLED_FILE" | cut -d'=' -f2- || true)
-    detect_package_manager
-    if [ -n "$recorded_pm" ]; then
-        PACKAGE_MANAGER="$recorded_pm"
-    fi
-
-    mapfile -t auto_packages < <(grep -v '^#' "$AUTO_INSTALLED_FILE" | grep -v '^PACKAGE_MANAGER=' | sed '/^$/d')
-    if [ ${#auto_packages[@]} -eq 0 ]; then
-        echo "  - 自动安装依赖列表为空，跳过"
-        return 0
-    fi
-
-    echo "  - 检测到安装脚本自动安装的依赖: ${auto_packages[*]}"
-    read -p "  - 是否卸载上述依赖? (y/N): " uninstall_choice
-    if [[ ! "$uninstall_choice" =~ ^[Yy]$ ]]; then
-        echo "  - 已跳过依赖卸载"
-        return 0
-    fi
-
-    if [ "$PACKAGE_MANAGER" = "unknown" ]; then
-        echo "  - ✗ 无法识别包管理器，请手动卸载: ${auto_packages[*]}"
-        return 1
-    fi
-
-    if uninstall_packages "${auto_packages[@]}"; then
-        echo "  - ✓ 已卸载自动安装的依赖"
-        rm -f "$AUTO_INSTALLED_FILE" 2>/dev/null || true
-        return 0
-    else
-        echo "  - ✗ 卸载依赖时出现问题"
         return 1
     fi
 }
@@ -3727,18 +3556,8 @@ complete_uninstall() {
         ((fail_count++))
     fi
     
-    # 4. 处理自动安装的依赖
-    echo "4. 处理自动安装的依赖..."
-    if handle_auto_installed_packages; then
-        echo "  - ✓ 依赖清理步骤完成"
-        ((success_count++))
-    else
-        echo "  - ✗ 依赖清理步骤遇到问题"
-        ((fail_count++))
-    fi
-
-    # 5. 保存清理后的状态
-    echo "5. 保存系统状态..."
+    # 4. 保存清理后的状态
+    echo "4. 保存系统状态..."
     if save_rules; then
         echo "  - ✓ 系统状态保存成功"
         ((success_count++))
@@ -3746,9 +3565,9 @@ complete_uninstall() {
         echo "  - ✗ 系统状态保存失败"
         ((fail_count++))
     fi
-
-    # 6. 删除所有文件
-    echo "6. 删除所有文件..."
+    
+    # 5. 删除所有文件
+    echo "5. 删除所有文件..."
     local files_success=true
     
     if [ -d "$BACKUP_DIR" ]; then
@@ -3793,8 +3612,8 @@ complete_uninstall() {
         ((fail_count++))
     fi
     
-    # 7. 删除脚本文件
-    echo "7. 删除脚本文件..."
+    # 6. 删除脚本文件
+    echo "6. 删除脚本文件..."
     local deleted_count=0
     local script_failed=false
     
@@ -4378,9 +4197,6 @@ show_enhanced_help() {
     echo -e "${CYAN}🔧 命令行参数:${NC}"
     echo "--verbose, -v     : 启用详细输出模式"
     echo "--no-backup      : 跳过自动备份"
-    echo "--config-dir PATH: 指定配置目录 (或设置 CONFIG_DIR 环境变量)"
-    echo "--log-file  FILE : 指定日志文件 (或设置 LOG_FILE 环境变量)"
-    echo "--backup-dir DIR : 指定备份目录 (或设置 BACKUP_DIR 环境变量)"
     echo "--ip-version 4|6 : 指定 IP 版本"
     echo "--help, -h       : 显示帮助信息"
     echo
@@ -4432,42 +4248,70 @@ check_for_updates() {
     echo -e "${BLUE}正在检查更新...${NC}"
     
     # GitHub仓库信息
+    local REPO_URL="https://api.github.com/repos/pjy02/Port-Mapping-Manage"
     local SCRIPT_URL="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main/port_mapping_manager.sh"
     local INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/main/install_pmm.sh"
-
+    
     # 临时文件
+    local temp_file="/tmp/pmm_update_check_$$"
     local temp_script="/tmp/pmm_script_update_$$"
-
+    
     # 注册临时文件以便自动清理
+    register_temp_file "$temp_file"
     register_temp_file "$temp_script"
-
+    
     # 检查curl是否可用
     if ! command -v curl &> /dev/null; then
         echo -e "${RED}错误：curl 命令不可用，无法检查更新${NC}"
         echo -e "${YELLOW}请手动安装 curl 后重试${NC}"
         return 1
     fi
-
-    # 下载远程脚本副本（同时用于版本检查与后续更新），减少重复请求
-    if ! curl -s --fail --connect-timeout 10 --max-time 60 \
-        -H "User-Agent: Port-Mapping-Manager/$SCRIPT_VERSION" \
-        -H "Accept: text/plain" \
-        "$SCRIPT_URL" -o "$temp_script" 2>/dev/null; then
+    
+    # 获取最新版本信息
+    if ! curl -s "$REPO_URL" > "$temp_file" 2>/dev/null; then
         echo -e "${RED}错误：无法连接到更新服务器${NC}"
         echo -e "${YELLOW}请检查网络连接或稍后重试${NC}"
+        rm -f "$temp_file"
         return 1
     fi
-
-    # 验证下载的脚本副本，以免误解析无效内容
-    if [ ! -s "$temp_script" ] || ! grep -q "SCRIPT_VERSION=" "$temp_script"; then
-        echo -e "${RED}错误：无法获取远程版本信息${NC}"
-        echo -e "${YELLOW}远程文件缺失或返回了无效内容${NC}"
-        return 1
-    fi
-
-    # 解析版本信息
+    
+    # 调试：显示API响应内容的前几行（已禁用）
+    # echo -e "${YELLOW}调试信息：API响应内容${NC}"
+    # head -10 "$temp_file" 2>/dev/null | sed 's/^/  /'
+    # echo
+    
+    # 解析版本信息 - 从仓库信息获取
     local remote_version=""
-    remote_version=$(grep "SCRIPT_VERSION=" "$temp_script" | cut -d'"' -f2 | head -1)
+    local release_notes=""
+    local default_branch=""
+    
+    # 获取默认分支
+    if grep -q '"default_branch"' "$temp_file"; then
+        default_branch=$(grep -o '"default_branch": "[^"]*"' "$temp_file" | cut -d'"' -f4)
+        # echo -e "${YELLOW}调试：默认分支: $default_branch${NC}"
+    fi
+    
+    # 如果获取到了默认分支，尝试从该分支的脚本文件获取版本
+    if [ -n "$default_branch" ]; then
+        local branch_script_url="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/$default_branch/port_mapping_manager.sh"
+        # echo -e "${YELLOW}调试：尝试从分支脚本获取版本${NC}"
+        if curl -s "$branch_script_url" | grep -q "SCRIPT_VERSION="; then
+            remote_version=$(curl -s "$branch_script_url" | grep "SCRIPT_VERSION=" | cut -d'"' -f2 | head -1)
+            # echo -e "${YELLOW}调试：从分支脚本获取版本: $remote_version${NC}"
+        fi
+    fi
+    
+    # 清理临时文件
+    rm -f "$temp_file"
+    
+    # 如果从分支脚本获取失败，尝试从main分支直接获取
+    if [ -z "$remote_version" ]; then
+        # echo -e "${YELLOW}调试：尝试从main分支直接获取版本信息${NC}"
+        if curl -s "$SCRIPT_URL" | grep -q "SCRIPT_VERSION="; then
+            remote_version=$(curl -s "$SCRIPT_URL" | grep "SCRIPT_VERSION=" | cut -d'"' -f2 | head -1)
+            # echo -e "${YELLOW}调试：从main分支获取版本: $remote_version${NC}"
+        fi
+    fi
     
     # 检查是否成功获取版本信息
     if [ -z "$remote_version" ]; then
@@ -4563,11 +4407,23 @@ check_for_updates() {
             read -p "是否要更新到最新版本? [y/N]: " update_choice
             case $update_choice in
                 [yY]|[yY][eE][sS])
-                    echo -e "${BLUE}使用已下载的远程脚本进行更新...${NC}"
-
-                    # 增强的脚本验证（重复使用先前下载的文件，避免额外请求）
+                    echo -e "${BLUE}正在下载更新...${NC}"
+                    
+                    # 下载新版本脚本（增强安全性）
+                    echo -e "${CYAN}正在从安全连接下载...${NC}"
+                    if ! curl -s --connect-timeout 10 --max-time 60 --fail \
+                        -H "User-Agent: Port-Mapping-Manager/$SCRIPT_VERSION" \
+                        -H "Accept: text/plain" \
+                        "$SCRIPT_URL" > "$temp_script" 2>/dev/null; then
+                        echo -e "${RED}错误：下载更新失败${NC}"
+                        echo -e "${YELLOW}可能的原因：网络连接问题或服务器不可用${NC}"
+                        rm -f "$temp_script"
+                        return 1
+                    fi
+                    
+                    # 增强的脚本验证
                     echo -e "${CYAN}正在验证下载的文件...${NC}"
-
+                    
                     # 检查文件大小（应该大于最小合理大小）
                     local file_size=$(wc -c < "$temp_script" 2>/dev/null || echo "0")
                     if [ "$file_size" -lt 10000 ]; then
@@ -4575,7 +4431,7 @@ check_for_updates() {
                         rm -f "$temp_script"
                         return 1
                     fi
-
+                    
                     # 验证脚本基本结构
                     if [ ! -s "$temp_script" ] || \
                        ! grep -q "SCRIPT_VERSION=" "$temp_script" || \
@@ -4585,16 +4441,16 @@ check_for_updates() {
                         rm -f "$temp_script"
                         return 1
                     fi
-
+                    
                     # 验证下载的版本号
                     local downloaded_version=$(grep "SCRIPT_VERSION=" "$temp_script" | cut -d'"' -f2 | head -1)
                     if [ "$downloaded_version" != "$remote_version" ]; then
                         echo -e "${YELLOW}警告：下载的版本号与预期不符${NC}"
                         echo -e "${YELLOW}预期: v${remote_version}, 实际: v${downloaded_version}${NC}"
                     fi
-
+                    
                     echo -e "${GREEN}✓ 文件验证通过${NC}"
-
+                    
                     # 备份当前脚本（增强错误处理）
                     local backup_path="$BACKUP_DIR/script_backup_$(date +%Y%m%d_%H%M%S).sh"
                     
@@ -4791,8 +4647,7 @@ show_backup_menu() {
 # 列出备份文件
 list_backups() {
     echo -e "${BLUE}可用备份文件:${NC}"
-    # 列表可能为空，允许 ls 返回非零以保持严格模式下的兼容性
-    local backups=($(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null || true))
+    local backups=($(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null))
     
     if [ ${#backups[@]} -eq 0 ]; then
         echo -e "${YELLOW}未找到备份文件${NC}"
@@ -4816,12 +4671,6 @@ initialize_script() {
     fi
     
     detect_system
-
-    if ! validate_paths; then
-        echo -e "${RED}初始化失败：路径校验未通过${NC}"
-        return 1
-    fi
-
     setup_directories
     
     if ! check_dependencies; then
@@ -4914,31 +4763,6 @@ while [[ $# -gt 0 ]]; do
             AUTO_BACKUP=false
             shift
             ;;
-        --config-dir)
-            if [ $# -lt 2 ]; then
-                echo "错误: --config-dir 需要参数"
-                exit 1
-            fi
-            CONFIG_DIR="$2"
-            shift 2
-            ;;
-        --log-file)
-            if [ $# -lt 2 ]; then
-                echo "错误: --log-file 需要参数"
-                exit 1
-            fi
-            LOG_FILE="$2"
-            shift 2
-            ;;
-        --backup-dir)
-            if [ $# -lt 2 ]; then
-                echo "错误: --backup-dir 需要参数"
-                exit 1
-            fi
-            BACKUP_DIR="$2"
-            BACKUP_DIR_OVERRIDDEN=true
-            shift 2
-            ;;
         --uninstall)
             uninstall_script
             ;;
@@ -4949,8 +4773,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
-refresh_path_variables
 
 # 主程序执行
 main() {
