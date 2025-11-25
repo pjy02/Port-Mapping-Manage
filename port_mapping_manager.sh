@@ -4414,10 +4414,13 @@ check_for_updates() {
     # 临时文件
     local temp_file="/tmp/pmm_update_check_$$"
     local temp_script="/tmp/pmm_script_update_$$"
-    
+    local remote_script_file="/tmp/pmm_remote_snapshot_$$"
+
     # 注册临时文件以便自动清理
     register_temp_file "$temp_file"
     register_temp_file "$temp_script"
+    register_temp_file "$remote_script_file"
+    register_temp_file "${temp_file}.headers"
     
     # 检查curl是否可用
     if ! command -v curl &> /dev/null; then
@@ -4426,49 +4429,47 @@ check_for_updates() {
         return 1
     fi
     
-    # 获取最新版本信息
-    if ! curl -s "$REPO_URL" > "$temp_file" 2>/dev/null; then
-        echo -e "${RED}错误：无法连接到更新服务器${NC}"
-        echo -e "${YELLOW}请检查网络连接或稍后重试${NC}"
-        rm -f "$temp_file"
-        return 1
-    fi
-    
-    # 调试：显示API响应内容的前几行（已禁用）
-    # echo -e "${YELLOW}调试信息：API响应内容${NC}"
-    # head -10 "$temp_file" 2>/dev/null | sed 's/^/  /'
-    # echo
-    
     # 解析版本信息 - 从仓库信息获取
     local remote_version=""
     local release_notes=""
     local default_branch=""
-    
+    local remote_branch="main"
+
     # 获取默认分支
-    if grep -q '"default_branch"' "$temp_file"; then
-        default_branch=$(grep -o '"default_branch": "[^"]*"' "$temp_file" | cut -d'"' -f4)
-        # echo -e "${YELLOW}调试：默认分支: $default_branch${NC}"
+    if curl -s -D "${temp_file}.headers" "$REPO_URL" > "$temp_file" 2>/dev/null; then
+        if grep -q '"default_branch"' "$temp_file"; then
+            default_branch=$(grep -o '"default_branch": "[^"]*"' "$temp_file" | cut -d'"' -f4)
+            [ -n "$default_branch" ] && remote_branch="$default_branch"
+        fi
+
+        # 处理 API 限流提示
+        if grep -qi "rate limit exceeded" "$temp_file"; then
+            echo -e "${YELLOW}警告：GitHub API 访问受限，已切换为直接拉取最新脚本${NC}"
+            remote_branch="main"
+        fi
+    else
+        echo -e "${YELLOW}警告：无法访问 GitHub API，将直接从默认分支检查更新${NC}"
     fi
-    
-    # 如果获取到了默认分支，尝试从该分支的脚本文件获取版本
-    if [ -n "$default_branch" ]; then
-        local branch_script_url="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/$default_branch/port_mapping_manager.sh"
-        # echo -e "${YELLOW}调试：尝试从分支脚本获取版本${NC}"
-        if curl -s "$branch_script_url" | grep -q "SCRIPT_VERSION="; then
-            remote_version=$(curl -s "$branch_script_url" | grep "SCRIPT_VERSION=" | cut -d'"' -f2 | head -1)
-            # echo -e "${YELLOW}调试：从分支脚本获取版本: $remote_version${NC}"
+
+    # 使用确定的分支尝试获取脚本快照（避免重复下载）
+    local branch_script_url="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/${remote_branch}/port_mapping_manager.sh"
+    if curl -s --connect-timeout 10 --max-time 30 --fail -L \
+        -H "User-Agent: Port-Mapping-Manager/$SCRIPT_VERSION" \
+        "$branch_script_url" -o "$remote_script_file" 2>/dev/null; then
+        if grep -q "SCRIPT_VERSION=" "$remote_script_file"; then
+            remote_version=$(grep "SCRIPT_VERSION=" "$remote_script_file" | cut -d'"' -f2 | head -1)
         fi
     fi
-    
-    # 清理临时文件
-    rm -f "$temp_file"
-    
-    # 如果从分支脚本获取失败，尝试从main分支直接获取
-    if [ -z "$remote_version" ]; then
-        # echo -e "${YELLOW}调试：尝试从main分支直接获取版本信息${NC}"
-        if curl -s "$SCRIPT_URL" | grep -q "SCRIPT_VERSION="; then
-            remote_version=$(curl -s "$SCRIPT_URL" | grep "SCRIPT_VERSION=" | cut -d'"' -f2 | head -1)
-            # echo -e "${YELLOW}调试：从main分支获取版本: $remote_version${NC}"
+
+    # 如果分支脚本拉取失败，降级到 main 分支
+    if [ -z "$remote_version" ] && [ "$remote_branch" != "main" ]; then
+        echo -e "${YELLOW}警告：无法从分支 ${remote_branch} 获取版本，尝试 main 分支${NC}"
+        if curl -s --connect-timeout 10 --max-time 30 --fail -L \
+            -H "User-Agent: Port-Mapping-Manager/$SCRIPT_VERSION" \
+            "$SCRIPT_URL" -o "$remote_script_file" 2>/dev/null; then
+            if grep -q "SCRIPT_VERSION=" "$remote_script_file"; then
+                remote_version=$(grep "SCRIPT_VERSION=" "$remote_script_file" | cut -d'"' -f2 | head -1)
+            fi
         fi
     fi
     
@@ -4567,17 +4568,28 @@ check_for_updates() {
             case $update_choice in
                 [yY]|[yY][eE][sS])
                     echo -e "${BLUE}正在下载更新...${NC}"
-                    
+
+                    # 若已获取远程脚本快照则复用，否则再下载一次
+                    if [ -s "$remote_script_file" ]; then
+                        cp "$remote_script_file" "$temp_script" 2>/dev/null || true
+                    fi
+
                     # 下载新版本脚本（增强安全性）
                     echo -e "${CYAN}正在从安全连接下载...${NC}"
-                    if ! curl -s --connect-timeout 10 --max-time 60 --fail \
-                        -H "User-Agent: Port-Mapping-Manager/$SCRIPT_VERSION" \
-                        -H "Accept: text/plain" \
-                        "$SCRIPT_URL" > "$temp_script" 2>/dev/null; then
-                        echo -e "${RED}错误：下载更新失败${NC}"
-                        echo -e "${YELLOW}可能的原因：网络连接问题或服务器不可用${NC}"
-                        rm -f "$temp_script"
-                        return 1
+                    if [ ! -s "$temp_script" ]; then
+                        local download_url="$branch_script_url"
+                        # 如果降级到 main 分支，则明确切换到 main
+                        [ -z "$remote_version" ] && download_url="$SCRIPT_URL"
+
+                        if ! curl -s --connect-timeout 10 --max-time 60 --fail -L \
+                            -H "User-Agent: Port-Mapping-Manager/$SCRIPT_VERSION" \
+                            -H "Accept: text/plain" \
+                            "$download_url" > "$temp_script" 2>/dev/null; then
+                            echo -e "${RED}错误：下载更新失败${NC}"
+                            echo -e "${YELLOW}可能的原因：网络连接问题或服务器不可用${NC}"
+                            rm -f "$temp_script"
+                            return 1
+                        fi
                     fi
                     
                     # 增强的脚本验证
