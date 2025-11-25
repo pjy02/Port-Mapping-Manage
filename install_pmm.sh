@@ -78,6 +78,7 @@ install_packages() {
 
 check_dependencies() {
     local missing=()
+    local auto_installed=()
     for cmd in "${REQUIRED_CMDS[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
@@ -86,6 +87,7 @@ check_dependencies() {
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         warn "缺少依赖：${missing[*]}，尝试自动安装..."
+        auto_installed=("${missing[@]}")
         install_packages "${missing[@]}"
     fi
 
@@ -96,6 +98,17 @@ check_dependencies() {
         fi
     done
     info "所有依赖已就绪。"
+
+    # 记录自动安装的依赖，便于卸载时提示/回滚
+    if [[ ${#auto_installed[@]} -gt 0 ]]; then
+        $SUDO mkdir -p "$SCRIPT_DIR"
+        {
+            echo "# 自动安装的依赖，卸载脚本可参考此列表选择回滚"
+            echo "PACKAGE_MANAGER=$PACKAGE_MANAGER"
+            printf '%s\n' "${auto_installed[@]}"
+        } | $SUDO tee "$SCRIPT_DIR/auto_installed_packages.list" >/dev/null
+        info "已记录自动安装的依赖: ${auto_installed[*]}"
+    fi
 }
 
 # --------------------------- 主安装流程 -------------------------------------
