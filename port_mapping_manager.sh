@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# TCP/UDP端口映射管理脚本 Enhanced v4.0
+# TCP/UDP端口映射管理脚本 Enhanced v4.1
 # 适用于 Hysteria2 机场端口跳跃配置
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断、性能优化等功能
 
 # 脚本配置
-SCRIPT_VERSION="4.0"
+SCRIPT_VERSION="4.1"
 RULE_COMMENT="udp-port-mapping-script-v4"
 CONFIG_DIR="/etc/port_mapping_manager"
 LOG_FILE="/var/log/udp-port-mapping.log"
