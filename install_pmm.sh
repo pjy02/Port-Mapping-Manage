@@ -76,6 +76,48 @@ install_packages() {
     esac
 }
 
+# 根据包管理器将缺失的命令映射为对应的软件包列表
+map_packages() {
+    local cmds=("$@")
+    local pkgs=()
+
+    add_pkg() {
+        local pkg="$1"
+        for existing in "${pkgs[@]}"; do
+            [[ "$existing" == "$pkg" ]] && return
+        done
+        pkgs+=("$pkg")
+    }
+
+    case $PACKAGE_MANAGER in
+        apt|yum|dnf)
+            for cmd in "${cmds[@]}"; do
+                case $cmd in
+                    curl) add_pkg curl ;;
+                    iptables|ip6tables|iptables-save|iptables-restore|ip6tables-save|ip6tables-restore)
+                        add_pkg iptables ;;
+                    *) add_pkg "$cmd" ;;
+                esac
+            done
+            ;;
+        pacman)
+            for cmd in "${cmds[@]}"; do
+                case $cmd in
+                    curl) add_pkg curl ;;
+                    iptables|ip6tables|iptables-save|iptables-restore|ip6tables-save|ip6tables-restore)
+                        add_pkg iptables ;;
+                    *) add_pkg "$cmd" ;;
+                esac
+            done
+            ;;
+        *)
+            pkgs=("${cmds[@]}")
+            ;;
+    esac
+
+    printf '%s\n' "${pkgs[@]}"
+}
+
 check_dependencies() {
     local missing=()
     for cmd in "${REQUIRED_CMDS[@]}"; do
@@ -86,7 +128,9 @@ check_dependencies() {
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         warn "缺少依赖：${missing[*]}，尝试自动安装..."
-        install_packages "${missing[@]}"
+        # 按包管理器映射命令到对应包名，避免因包名差异导致安装失败
+        mapfile -t pkg_list < <(map_packages "${missing[@]}")
+        install_packages "${pkg_list[@]}"
     fi
 
     # 再次检查
