@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# TCP/UDP端口映射管理脚本 Enhanced v4.1
+# TCP/UDP端口映射管理脚本 Enhanced v4.2
 # 适用于 Hysteria2 机场端口跳跃配置
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断、性能优化等功能
 
 # 脚本配置
-SCRIPT_VERSION="4.1"
+SCRIPT_VERSION="4.2"
 RULE_COMMENT="udp-port-mapping-script-v4"
 CONFIG_DIR="/etc/port_mapping_manager"
 LOG_FILE="/var/log/udp-port-mapping.log"
@@ -27,6 +27,10 @@ PERSISTENT_METHOD=""
 VERBOSE_MODE=false
 AUTO_BACKUP=true
 IP_VERSION="4" # 默认使用IPv4
+PUBLIC_IPV4=""
+PUBLIC_IPV6=""
+PUBLIC_IP_TIMESTAMP=0
+PUBLIC_IP_TTL=600  # 公网IP检测结果缓存时间，默认10分钟
 
 # 性能优化缓存变量
 IPTABLES_CACHE_FILE=""
@@ -4713,14 +4717,96 @@ switch_ip_version() {
     log_message "INFO" "IP版本切换至: IPv${IP_VERSION}"
 }
 
+# 公网IP检测（带缓存）
+get_public_ip() {
+    local version="$1"
+    local current_time=$(date +%s)
+    local cached_value=""
+    local last_time=0
+
+    case "$version" in
+        4)
+            cached_value="$PUBLIC_IPV4"
+            last_time=$PUBLIC_IP_TIMESTAMP
+            ;;
+        6)
+            cached_value="$PUBLIC_IPV6"
+            last_time=$PUBLIC_IP_TIMESTAMP
+            ;;
+        *)
+            echo "未知版本"
+            return
+            ;;
+    esac
+
+    if [ -n "$cached_value" ] && [ $((current_time - last_time)) -lt $PUBLIC_IP_TTL ]; then
+        echo "$cached_value"
+        return
+    fi
+
+    if ! command -v curl &>/dev/null; then
+        echo "未安装 curl"
+        return
+    fi
+
+    local curl_opts=("-s" "--connect-timeout" "3" "--max-time" "5" "--retry" "1" "--retry-delay" "1")
+    local service_urls=()
+    local curl_flag="-4"
+    local result=""
+
+    if [ "$version" = "6" ]; then
+        service_urls=("https://api64.ipify.org" "https://ipv6.ip.sb")
+        curl_flag="-6"
+    else
+        service_urls=("https://api.ipify.org" "https://ip.sb")
+    fi
+
+    local ip_regex
+    if [ "$version" = "6" ]; then
+        ip_regex='^[0-9a-fA-F:]+$'
+    else
+        ip_regex='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+    fi
+
+    for service_url in "${service_urls[@]}"; do
+        result=$(curl "$curl_flag" "${curl_opts[@]}" "$service_url" 2>/dev/null)
+        if [[ -n "$result" && "$result" =~ $ip_regex ]]; then
+            break
+        fi
+        result=""
+    done
+
+    # IPv6 再尝试从本机全局地址获取
+    if [ -z "$result" ] && [ "$version" = "6" ] && command -v ip &>/dev/null; then
+        result=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1 | head -n1)
+        [[ -n "$result" && "$result" =~ $ip_regex ]] || result=""
+    fi
+
+    if [[ -n "$result" && "$result" =~ $ip_regex ]]; then
+        if [ "$version" = "6" ]; then
+            PUBLIC_IPV6="$result"
+        else
+            PUBLIC_IPV4="$result"
+        fi
+        PUBLIC_IP_TIMESTAMP=$current_time
+        echo "$result"
+    else
+        echo "检测失败"
+    fi
+}
+
 # 主菜单
 show_main_menu() {
     clear
     local ip_version_str="IPv${IP_VERSION}"
+    local public_ipv4=$(get_public_ip 4)
+    local public_ipv6=$(get_public_ip 6)
     echo -e "${GREEN}=========================================${NC}"
     echo -e "${GREEN}  UDP端口映射管理脚本 Enhanced v${SCRIPT_VERSION}  [当前: ${ip_version_str}]${NC}"
     echo -e "${CYAN}  https://github.com/pjy02/Port-Mapping-Manage${NC}"
     echo -e "${GREEN}=========================================${NC}"
+    echo -e "${YELLOW}  公网IPv4: ${public_ipv4}${NC}"
+    echo -e "${YELLOW}  公网IPv6: ${public_ipv6}${NC}"
 
     echo
     echo -e "${BLUE}主要功能:${NC}"
