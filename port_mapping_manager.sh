@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# TCP/UDP端口映射管理脚本 Enhanced v4.1
+# TCP/UDP端口映射管理脚本 Enhanced v4.2
 # 适用于 Hysteria2 机场端口跳跃配置
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断、性能优化等功能
 
 # 脚本配置
-SCRIPT_VERSION="4.1"
+SCRIPT_VERSION="4.2"
 RULE_COMMENT="udp-port-mapping-script-v4"
 CONFIG_DIR="/etc/port_mapping_manager"
 LOG_FILE="/var/log/udp-port-mapping.log"
@@ -4750,20 +4750,36 @@ get_public_ip() {
     fi
 
     local curl_opts=("-s" "--connect-timeout" "3" "--max-time" "5" "--retry" "1" "--retry-delay" "1")
-    local service_url="https://api.ipify.org"
-    local result
+    local service_urls=()
+    local curl_flag="-4"
+    local result=""
 
     if [ "$version" = "6" ]; then
-        result=$(curl -6 "${curl_opts[@]}" "$service_url" 2>/dev/null)
+        service_urls=("https://api64.ipify.org" "https://ipv6.ip.sb")
+        curl_flag="-6"
     else
-        result=$(curl -4 "${curl_opts[@]}" "$service_url" 2>/dev/null)
+        service_urls=("https://api.ipify.org" "https://ip.sb")
     fi
 
     local ip_regex
     if [ "$version" = "6" ]; then
-        ip_regex='^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
+        ip_regex='^[0-9a-fA-F:]+$'
     else
         ip_regex='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+    fi
+
+    for service_url in "${service_urls[@]}"; do
+        result=$(curl "$curl_flag" "${curl_opts[@]}" "$service_url" 2>/dev/null)
+        if [[ -n "$result" && "$result" =~ $ip_regex ]]; then
+            break
+        fi
+        result=""
+    done
+
+    # IPv6 再尝试从本机全局地址获取
+    if [ -z "$result" ] && [ "$version" = "6" ] && command -v ip &>/dev/null; then
+        result=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1 | head -n1)
+        [[ -n "$result" && "$result" =~ $ip_regex ]] || result=""
     fi
 
     if [[ -n "$result" && "$result" =~ $ip_regex ]]; then
