@@ -1,6 +1,18 @@
 name: Release
+run-name: Release ${{ inputs.version || github.ref_name }}
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (vX.Y.Z)"
+        required: true
+        type: string
+      prerelease:
+        description: "Publish as a pre-release"
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - "v*.*.*"
@@ -8,16 +20,34 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   build-release:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      VERSION: ${{ inputs.version || github.ref_name }}
+      PRERELEASE: ${{ inputs.prerelease || false }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
 
     steps:
-      - name: Checkout tag
+      - name: Checkout release source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+
+      - name: Validate release request
+        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            [ "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH" ] || {
+              echo "Manual releases must run from the default branch: $DEFAULT_BRANCH" >&2
+              exit 1
+            }
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
@@ -28,10 +58,8 @@ jobs:
 
       - name: Test and build release assets
         env:
-          VERSION: ${{ github.ref_name }}
           RELEASE_SIGNING_KEY: ${{ secrets.PMM_RELEASE_SIGNING_KEY }}
         run: |
-          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]
           test -n "$RELEASE_SIGNING_KEY"
           go test ./...
           go vet ./...
@@ -56,11 +84,32 @@ jobs:
           (cd dist && sha256sum install_pmm.sh > install_pmm.sh.sha256)
           rm -f "$RUNNER_TEMP/pmm-release-signing.pem" "$RUNNER_TEMP/derived-public.pem"
 
+      - name: Create immutable tag for manual release
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/$VERSION:refs/tags/$VERSION"
+            [ "$(git rev-list -n 1 "$VERSION")" = "$GITHUB_SHA" ] || {
+              echo "Tag $VERSION already points to a different commit" >&2
+              exit 1
+            }
+            echo "Reusing $VERSION from an earlier run for the same commit"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$VERSION" "$GITHUB_SHA" -m "Port Mapping Manager $VERSION"
+            git push origin "refs/tags/$VERSION"
+          fi
+
       - name: Create immutable-tag release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          release_flags=(--verify-tag --generate-notes --title "$VERSION")
+          if [ "$PRERELEASE" = true ]; then
+            release_flags+=(--prerelease)
+          fi
+          gh release create "$VERSION" \
             dist/pmm-linux-amd64 \
             dist/pmm-linux-arm64 \
             dist/release-manifest.sha256 \
@@ -68,4 +117,4 @@ jobs:
             dist/release-signing-public.pem \
             dist/install_pmm.sh \
             dist/install_pmm.sh.sha256 \
-            --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+            "${release_flags[@]}"
