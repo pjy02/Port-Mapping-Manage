@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -19,20 +20,24 @@ type menuInput struct {
 
 func (c cli) menu(ctx context.Context) error {
 	in := menuInput{reader: bufio.NewReader(c.stdin), out: c.stdout}
+	interactive := isTerminalFile(c.stdin) && isTerminalFile(c.stdout) && os.Getenv("TERM") != "dumb"
+	theme := newDashboardTheme(c.stdout)
 	for {
-		fmt.Fprintln(c.stdout, "\nPort Mapping Manager v6")
-		fmt.Fprintln(c.stdout, "1. 规则列表       2. 添加规则       3. 管理规则")
-		fmt.Fprintln(c.stdout, "4. 批量导入导出   5. 备份与恢复     6. 诊断")
-		fmt.Fprintln(c.stdout, "7. 流量监控       8. 持久化管理     9. 旧版迁移")
-		fmt.Fprintln(c.stdout, "10. 公网地址      11. 检查更新      12. 卸载计划      0. 退出")
-		choice, err := in.prompt("选择", "")
+		if interactive {
+			fmt.Fprint(c.stdout, "\x1b[2J\x1b[H")
+		} else {
+			fmt.Fprintln(c.stdout)
+		}
+		renderDashboard(c.stdout, c.dashboardStatus(ctx), theme)
+		choice, err := in.prompt("请选择", "")
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
 			return err
 		}
-		if choice == "0" {
+		choice = strings.ToLower(choice)
+		if choice == "0" || choice == "q" {
 			return nil
 		}
 		var actionErr error
@@ -44,28 +49,33 @@ func (c cli) menu(ctx context.Context) error {
 		case "3":
 			actionErr = c.menuManageRule(ctx, in)
 		case "4":
-			actionErr = c.menuBatch(ctx, in)
-		case "5":
-			actionErr = c.menuBackup(ctx, in)
-		case "6":
-			actionErr = c.menuDoctor(ctx, in)
-		case "7":
 			actionErr = c.menuMonitor(ctx, in)
+		case "5":
+			actionErr = c.menuDoctor(ctx, in)
+		case "6":
+			actionErr = c.menuBatch(ctx, in)
+		case "7":
+			actionErr = c.menuBackup(ctx, in)
 		case "8":
 			actionErr = c.menuPersistence(ctx, in)
 		case "9":
-			actionErr = c.menuMigration(ctx, in)
-		case "10":
 			actionErr = c.menuAddress(ctx, in)
-		case "11":
+		case "10":
+			actionErr = c.menuMigration(ctx, in)
+		case "u", "11":
 			actionErr = c.update(ctx, []string{"check"})
-		case "12":
+		case "x", "12":
 			actionErr = c.menuUninstall(ctx, in)
 		default:
 			fmt.Fprintln(c.stderr, "无效选择")
 		}
 		if actionErr != nil {
 			fmt.Fprintln(c.stderr, "错误:", actionErr)
+		}
+		if interactive {
+			if err := in.pause(); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -438,6 +448,15 @@ func (in menuInput) promptInt(label string, defaultValue, minimum, maximum int) 
 		return 0, fmt.Errorf("%s 必须在 %d-%d 之间", label, minimum, maximum)
 	}
 	return parsed, nil
+}
+
+func (in menuInput) pause() error {
+	fmt.Fprint(in.out, "\n按回车键返回主菜单...")
+	_, err := in.reader.ReadString('\n')
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	return err
 }
 
 func resolveRule(rules []model.Rule, input string) (model.Rule, error) {
