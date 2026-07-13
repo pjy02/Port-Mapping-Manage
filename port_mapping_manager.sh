@@ -1,16 +1,21 @@
 #!/bin/bash
 
-# TCP/UDP端口映射管理脚本 Enhanced v4.2
+# TCP/UDP端口映射管理脚本 Enhanced v5.0
 # 适用于 Hysteria2 机场端口跳跃配置
 # 增强版本包含：安全性改进、错误处理、批量操作、监控诊断、性能优化等功能
 
 # 脚本配置
-SCRIPT_VERSION="4.2"
+SCRIPT_VERSION="5.0"
 RULE_COMMENT="udp-port-mapping-script-v4"
 CONFIG_DIR="/etc/port_mapping_manager"
 LOG_FILE="/var/log/udp-port-mapping.log"
 BACKUP_DIR="$CONFIG_DIR/backups"
 CONFIG_FILE="$CONFIG_DIR/config.conf"
+RULES_DB="$CONFIG_DIR/rules.db"
+RESTORE_SCRIPT="$CONFIG_DIR/restore-owned-rules.sh"
+PERSISTENCE_SERVICE="pmm-rules.service"
+PERSISTENCE_SERVICE_FILE="/etc/systemd/system/$PERSISTENCE_SERVICE"
+LAST_BACKUP_FILE=""
 
 # 颜色定义
 readonly GREEN='\033[0;32m'
@@ -38,6 +43,10 @@ IPTABLES_CACHE_TIMESTAMP=0
 IPTABLES_CACHE_TTL=30  # 缓存有效期30秒
 RULES_CACHE=""
 RULES_CACHE_TIMESTAMP=0
+RULES_CACHE_V4=""
+RULES_CACHE_V4_TIMESTAMP=0
+RULES_CACHE_V6=""
+RULES_CACHE_V6_TIMESTAMP=0
 
 # 临时文件跟踪数组
 TEMP_FILES=()
@@ -119,6 +128,7 @@ log_message() {
             [ "$VERBOSE_MODE" = true ] && echo -e "${CYAN}[$level] $message${NC}"
             ;;
     esac
+    return 0
 }
 
 # 输入安全验证
@@ -261,12 +271,19 @@ validate_environment() {
 cache_iptables_rules() {
     local ip_version=${1:-$IP_VERSION}
     local current_time=$(date +%s)
-    local cache_key="iptables_${ip_version}"
-    
-    # 检查缓存是否仍然有效
-    if [ -n "$RULES_CACHE" ] && [ $((current_time - RULES_CACHE_TIMESTAMP)) -lt $IPTABLES_CACHE_TTL ]; then
-        log_message "DEBUG" "使用缓存的 iptables 规则"
-        echo "$RULES_CACHE"
+    local cached_rules cache_timestamp
+
+    if [ "$ip_version" = "6" ]; then
+        cached_rules=$RULES_CACHE_V6
+        cache_timestamp=$RULES_CACHE_V6_TIMESTAMP
+    else
+        cached_rules=$RULES_CACHE_V4
+        cache_timestamp=$RULES_CACHE_V4_TIMESTAMP
+    fi
+
+    if [ -n "$cached_rules" ] && [ $((current_time - cache_timestamp)) -lt $IPTABLES_CACHE_TTL ]; then
+        log_message "DEBUG" "使用缓存的 IPv${ip_version} iptables 规则"
+        echo "$cached_rules"
         return 0
     fi
     
@@ -277,9 +294,15 @@ cache_iptables_rules() {
     fi
     
     log_message "DEBUG" "刷新 iptables 规则缓存"
-    if RULES_CACHE=$($iptables_cmd -t nat -L PREROUTING -n --line-numbers 2>/dev/null); then
-        RULES_CACHE_TIMESTAMP=$current_time
-        echo "$RULES_CACHE"
+    if cached_rules=$($iptables_cmd -t nat -L PREROUTING -n --line-numbers 2>/dev/null); then
+        if [ "$ip_version" = "6" ]; then
+            RULES_CACHE_V6=$cached_rules
+            RULES_CACHE_V6_TIMESTAMP=$current_time
+        else
+            RULES_CACHE_V4=$cached_rules
+            RULES_CACHE_V4_TIMESTAMP=$current_time
+        fi
+        echo "$cached_rules"
         return 0
     else
         log_message "ERROR" "获取 iptables 规则失败"
@@ -292,6 +315,10 @@ clear_iptables_cache() {
     log_message "DEBUG" "清除 iptables 缓存"
     RULES_CACHE=""
     RULES_CACHE_TIMESTAMP=0
+    RULES_CACHE_V4=""
+    RULES_CACHE_V4_TIMESTAMP=0
+    RULES_CACHE_V6=""
+    RULES_CACHE_V6_TIMESTAMP=0
     
     # 清理临时缓存文件
     if [ -n "$IPTABLES_CACHE_FILE" ] && [ -f "$IPTABLES_CACHE_FILE" ]; then
@@ -422,7 +449,7 @@ check_root() {
 }
 
 # 交互式清理备份文件
-interactive_cleanup_backups() {
+legacy_interactive_cleanup_backups() {
     # 使用更兼容的方式处理文件列表
     local backup_files
     backup_files=$(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null)
@@ -500,8 +527,9 @@ check_dependencies() {
     
     if [ ${#missing_deps[@]} -ne 0 ]; then
         echo -e "${RED}错误：缺少必要的依赖：${missing_deps[*]}${NC}"
-        echo -e "正在尝试自动安装..."
-        install_dependencies "${missing_deps[@]}"
+        echo -e "启动检查不会自动安装软件，请运行 install_pmm.sh 或手动安装依赖。"
+        log_message "ERROR" "缺少依赖，启动阶段拒绝自动安装: ${missing_deps[*]}"
+        return 1
     fi
     
     # 检查iptables功能
@@ -628,8 +656,132 @@ EOF
     log_message "INFO" "创建默认配置文件"
 }
 
+# --- 统一规则数据模型 -------------------------------------------------------
+# 每行格式: IP版本|协议|起始端口|结束端口|目标端口
+# 示例: 4|udp|6000|7000|3000
+validate_rule_record() {
+    local ip_version=$1 protocol=$2 start_port=$3 end_port=$4 target_port=$5
+
+    [[ "$ip_version" =~ ^[46]$ ]] || return 1
+    [[ "$protocol" =~ ^(tcp|udp)$ ]] || return 1
+    [[ "$start_port" =~ ^[0-9]+$ ]] || return 1
+    [[ "$end_port" =~ ^[0-9]+$ ]] || return 1
+    [[ "$target_port" =~ ^[0-9]+$ ]] || return 1
+    [ "$start_port" -ge 1 ] && [ "$start_port" -le 65535 ] || return 1
+    [ "$end_port" -ge 1 ] && [ "$end_port" -le 65535 ] || return 1
+    [ "$target_port" -ge 1 ] && [ "$target_port" -le 65535 ] || return 1
+    [ "$start_port" -le "$end_port" ] || return 1
+    return 0
+}
+
+rule_record() {
+    printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5"
+}
+
+rule_model_add() {
+    local ip_version=$1 protocol=$2 start_port=$3 end_port=$4 target_port=$5
+    local record temp_file
+
+    if ! validate_rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$target_port"; then
+        log_message "ERROR" "拒绝写入无效规则模型: $ip_version|$protocol|$start_port|$end_port|$target_port"
+        return 1
+    fi
+
+    mkdir -p "$CONFIG_DIR" || return 1
+    touch "$RULES_DB" || return 1
+    chmod 600 "$RULES_DB" 2>/dev/null || true
+    record=$(rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$target_port")
+    grep -Fxq "$record" "$RULES_DB" 2>/dev/null && return 0
+
+    temp_file=$(mktemp "$CONFIG_DIR/.rules.db.XXXXXX") || return 1
+    { cat "$RULES_DB" 2>/dev/null; printf '%s\n' "$record"; } | sort -u > "$temp_file"
+    chmod 600 "$temp_file" 2>/dev/null || true
+    mv -f "$temp_file" "$RULES_DB"
+}
+
+rule_model_remove() {
+    local ip_version=$1 protocol=$2 start_port=$3 end_port=$4 target_port=$5
+    local record temp_file
+    [ -f "$RULES_DB" ] || return 0
+
+    record=$(rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$target_port")
+    temp_file=$(mktemp "$CONFIG_DIR/.rules.db.XXXXXX") || return 1
+    grep -Fvx "$record" "$RULES_DB" > "$temp_file" 2>/dev/null || true
+    chmod 600 "$temp_file" 2>/dev/null || true
+    mv -f "$temp_file" "$RULES_DB"
+}
+
+extract_owned_rules() {
+    local ip_version iptables_cmd line protocol ports start_port end_port target_port
+
+    for ip_version in 4 6; do
+        iptables_cmd=$(get_iptables_cmd "$ip_version")
+        command -v "$iptables_cmd" >/dev/null 2>&1 || continue
+
+        while IFS= read -r line; do
+            [[ "$line" == *"$RULE_COMMENT"* ]] || continue
+            [[ "$line" == *"-j REDIRECT"* ]] || continue
+
+            protocol=$(printf '%s\n' "$line" | sed -n 's/.* -p \(tcp\|udp\) .*/\1/p')
+            ports=$(printf '%s\n' "$line" | sed -n 's/.*--dport \([0-9][0-9]*\)\(:\([0-9][0-9]*\)\)\?.*/\1|\3/p')
+            target_port=$(printf '%s\n' "$line" | sed -n 's/.*--to-ports\? \([0-9][0-9]*\).*/\1/p')
+            start_port=${ports%%|*}
+            end_port=${ports#*|}
+            [ -n "$end_port" ] || end_port=$start_port
+
+            if validate_rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$target_port"; then
+                rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$target_port"
+            fi
+        done < <("$iptables_cmd" -t nat -S PREROUTING 2>/dev/null)
+    done
+}
+
+# 显式操作调用此函数，把内核中带项目标记的规则同步到项目数据库。
+sync_rule_model_from_kernel() {
+    local temp_file
+    mkdir -p "$CONFIG_DIR" || return 1
+    temp_file=$(mktemp "$CONFIG_DIR/.rules.db.XXXXXX") || return 1
+    extract_owned_rules | sort -u > "$temp_file"
+    chmod 600 "$temp_file" 2>/dev/null || true
+    mv -f "$temp_file" "$RULES_DB"
+    log_message "INFO" "规则数据模型已从内核同步"
+}
+
+validate_rule_model_file() {
+    local line_no=0 ip_version protocol start_port end_port target_port
+    local model_file=${1:-$RULES_DB}
+    [ -f "$model_file" ] || return 1
+
+    while IFS='|' read -r ip_version protocol start_port end_port target_port extra; do
+        ((line_no++))
+        [ -z "$ip_version$protocol$start_port$end_port$target_port$extra" ] && continue
+        [ -z "$extra" ] || return 1
+        validate_rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$target_port" || return 1
+    done < "$model_file"
+    return 0
+}
+
+apply_rule_record() {
+    local ip_version=$1 protocol=$2 start_port=$3 end_port=$4 target_port=$5
+    local iptables_cmd
+
+    validate_rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$target_port" || return 1
+    iptables_cmd=$(get_iptables_cmd "$ip_version")
+    command -v "$iptables_cmd" >/dev/null 2>&1 || return 1
+
+    if "$iptables_cmd" -t nat -C PREROUTING -p "$protocol" --dport "$start_port:$end_port" \
+        -m comment --comment "$RULE_COMMENT" -j REDIRECT --to-port "$target_port" 2>/dev/null; then
+        rule_model_add "$ip_version" "$protocol" "$start_port" "$end_port" "$target_port"
+        return $?
+    fi
+
+    "$iptables_cmd" -t nat -A PREROUTING -p "$protocol" --dport "$start_port:$end_port" \
+        -m comment --comment "$RULE_COMMENT" -j REDIRECT --to-port "$target_port" || return 1
+    rule_model_add "$ip_version" "$protocol" "$start_port" "$end_port" "$target_port"
+}
+
 # 保存配置到文件
-save_mapping_config() {
+legacy_save_mapping_config() {
     local start_port=$1
     local end_port=$2
     local service_port=$3
@@ -690,7 +842,7 @@ EOF
 # --- 备份和恢复函数 ---
 
 # 备份当前iptables规则
-backup_rules() {
+legacy_backup_rules() {
     local backup_file="$BACKUP_DIR/iptables_backup_$(date +%Y%m%d_%H%M%S).rules"
     
     if iptables-save > "$backup_file" 2>/dev/null; then
@@ -708,7 +860,7 @@ backup_rules() {
 }
 
 # 清理旧备份
-cleanup_old_backups() {
+legacy_cleanup_old_backups() {
     local max_backups=${MAX_BACKUPS:-10}
     local backup_count=$(ls -1 "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null | wc -l)
     
@@ -720,7 +872,7 @@ cleanup_old_backups() {
 }
 
 # 恢复规则
-restore_from_backup() {
+legacy_restore_from_backup() {
     echo -e "${BLUE}可用的备份文件：${NC}"
     local backups=($(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null))
     
@@ -1112,7 +1264,7 @@ add_mapping_rule() {
     if [ "$AUTO_BACKUP" = true ]; then
         echo "正在备份当前规则..."
         if backup_rules; then
-            backup_file="$BACKUP_DIR/iptables_backup_$(date +%Y%m%d_%H%M%S).rules"
+            backup_file="$LAST_BACKUP_FILE"
             log_message "INFO" "备份成功: $backup_file"
         else
             echo -e "${YELLOW}⚠ 备份失败，但继续执行${NC}"
@@ -1147,6 +1299,9 @@ add_mapping_rule() {
     if [ $exit_code -eq 0 ]; then
         echo -e "${GREEN}✓ 映射规则添加成功: ${protocol^^} ${start_port}-${end_port} -> ${service_port}${NC}"
         log_message "INFO" "添加规则: ${protocol^^} ${start_port}-${end_port} -> ${service_port}"
+        rule_model_add "$IP_VERSION" "$protocol" "$start_port" "$end_port" "$service_port" || \
+            log_message "WARNING" "规则已生效，但写入统一规则模型失败"
+        clear_iptables_cache
         
         # 保存配置
         if ! save_mapping_config "$start_port" "$end_port" "$service_port" "$protocol"; then
@@ -1157,15 +1312,19 @@ add_mapping_rule() {
         # 显示规则状态
         show_current_rules
         
-        # 询问是否永久保存
-        read -p "是否将规则永久保存? (y/n): " save_choice
-        if [[ "$save_choice" == "y" || "$save_choice" == "Y" ]]; then
-            if ! save_rules; then
-                echo -e "${YELLOW}⚠ 永久保存失败，规则仅为临时规则${NC}"
-                log_message "WARNING" "规则永久保存失败"
-            fi
+        # 统一模型始终记录当前项目规则；专属服务启用后，后续变更自动保持一致。
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled "$PERSISTENCE_SERVICE" >/dev/null 2>&1; then
+            echo -e "${GREEN}项目持久化服务已启用，本次变更已写入统一规则模型。${NC}"
         else
-            echo -e "${YELLOW}注意：规则仅为临时规则，重启后将失效。${NC}"
+            read -p "是否启用项目专属持久化? (y/n): " save_choice
+            if [[ "$save_choice" == "y" || "$save_choice" == "Y" ]]; then
+                if ! save_rules; then
+                    echo -e "${YELLOW}⚠ 持久化配置失败，规则将在重启后失效${NC}"
+                    log_message "WARNING" "规则持久化配置失败"
+                fi
+            else
+                echo -e "${YELLOW}注意：持久化服务未启用，规则将在重启后失效。${NC}"
+            fi
         fi
         
     else
@@ -1350,7 +1509,7 @@ show_manual_save_instructions() {
 }
 
 # 检查和修复持久化配置
-check_and_fix_persistence() {
+legacy_check_and_fix_persistence() {
     echo -e "${BLUE}========== 检查持久化配置 ==========${NC}"
     local service_file="/etc/systemd/system/iptables-restore.service"
     local restore_script="$CONFIG_DIR/restore-rules.sh"
@@ -1598,7 +1757,7 @@ check_and_fix_persistence() {
 }
 
 # 增强的规则保存
-save_rules() {
+legacy_save_rules() {
     local rules_file_v4="$CONFIG_DIR/current.rules.v4"
     local rules_file_v6="$CONFIG_DIR/current.rules.v6"
     local save_success=false
@@ -1772,7 +1931,7 @@ save_rules() {
 }
 
 # 验证持久化配置
-verify_persistence_config() {
+legacy_verify_persistence_config() {
     local verification_passed=false
     
     echo "正在验证持久化配置..."
@@ -1805,7 +1964,7 @@ verify_persistence_config() {
 }
 
 # 测试持久化配置
-test_persistence_config() {
+legacy_test_persistence_config() {
     echo -e "${BLUE}========== 测试持久化配置 ==========${NC}"
     echo
     echo "此功能将测试持久化配置是否能正确工作"
@@ -1995,7 +2154,7 @@ test_persistence_config() {
 }
 
 # 创建规则恢复脚本
-create_restore_script() {
+legacy_create_restore_script() {
     local restore_script="$CONFIG_DIR/restore-rules.sh"
     
     cat > "$restore_script" <<'EOF'
@@ -2099,7 +2258,7 @@ install_persistence_package() {
 }
 
 # 配置 systemd 服务以实现持久化
-setup_systemd_service() {
+legacy_setup_systemd_service() {
     local service_file="/etc/systemd/system/iptables-restore.service"
     local restore_script="$CONFIG_DIR/restore-rules.sh"
     
@@ -2218,7 +2377,7 @@ EOF
 # 批量导入规则
 batch_import_rules() {
     echo -e "${BLUE}批量导入规则${NC}"
-    echo "请输入配置文件路径 (格式: start_port:end_port:service_port 每行一个):"
+    echo "请输入配置文件路径 (推荐格式: IP版本|协议|起始端口|结束端口|目标端口):"
     read -p "文件路径: " config_file
     
     if [ ! -f "$config_file" ]; then
@@ -2230,29 +2389,33 @@ batch_import_rules() {
     local success_count=0
     local error_count=0
     
-    while IFS=':' read -r start_port end_port service_port; do
+    while IFS= read -r raw_line; do
         ((line_num++))
-        
-        # 跳过空行和注释
-        [[ -z "$start_port" ]] || [[ "$start_port" =~ ^#.*$ ]] && continue
-        
-        echo "处理第 $line_num 行: $start_port:$end_port:$service_port"
-        
-        if validate_port "$start_port" "起始端口" && \
-           validate_port "$end_port" "终止端口" && \
-           validate_port "$service_port" "服务端口"; then
-            
-            if add_mapping_rule "$start_port" "$end_port" "$service_port"; then
-                ((success_count++))
-            else
-                ((error_count++))
-            fi
+
+        raw_line=${raw_line%$'\r'}
+        [[ -z "$raw_line" || "$raw_line" =~ ^[[:space:]]*# ]] && continue
+
+        local ip_version protocol start_port end_port service_port extra
+        if [[ "$raw_line" == *"|"* ]]; then
+            IFS='|' read -r ip_version protocol start_port end_port service_port extra <<< "$raw_line"
+        else
+            # 兼容旧版三字段格式；旧格式没有协议和IP版本信息。
+            IFS=':' read -r start_port end_port service_port extra <<< "$raw_line"
+            ip_version=$IP_VERSION
+            protocol="udp"
+        fi
+
+        echo "处理第 $line_num 行: IPv${ip_version} ${protocol^^} ${start_port}-${end_port} -> ${service_port}"
+        if [ -z "$extra" ] && validate_rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$service_port" && \
+           apply_rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$service_port"; then
+            ((success_count++))
         else
             echo -e "${RED}第 $line_num 行格式错误，跳过${NC}"
             ((error_count++))
         fi
     done < "$config_file"
-    
+
+    clear_iptables_cache
     echo -e "${GREEN}批量导入完成: 成功 $success_count 条, 失败 $error_count 条${NC}"
     log_message "INFO" "批量导入: 成功=$success_count, 失败=$error_count"
 }
@@ -2260,39 +2423,23 @@ batch_import_rules() {
 # 批量导出规则
 batch_export_rules() {
     local export_file="${1:-$CONFIG_DIR/exported_rules_$(date +%Y%m%d_%H%M%S).conf}"
-    
+
     echo "正在导出规则到: $export_file"
-    
-    # 写入文件头
+
+    if ! sync_rule_model_from_kernel; then
+        echo -e "${RED}✗ 无法同步当前项目规则${NC}"
+        return 1
+    fi
+
     cat > "$export_file" << EOF
-# UDP端口映射规则导出文件
+# Port Mapping Manager 规则导出文件
 # 生成时间: $(date)
-# 格式: start_port:end_port:service_port
-# 
+# 格式: IP版本|协议|起始端口|结束端口|目标端口
 EOF
-    
-    # 提取并写入规则
-    local exported_count=0
-    while IFS= read -r rule; do
-        if echo "$rule" | grep -q "$RULE_COMMENT"; then
-            local port_range=""
-            local service_port=""
-            
-            if echo "$rule" | grep -q "dpts:"; then
-                port_range=$(echo "$rule" | sed -n 's/.*dpts:\([0-9]*:[0-9]*\).*/\1/p')
-            fi
-            
-            if echo "$rule" | grep -q "redir ports"; then
-                service_port=$(echo "$rule" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p')
-            fi
-            
-            if [ -n "$port_range" ] && [ -n "$service_port" ]; then
-                echo "${port_range}:${service_port}" | tr ':' ':' >> "$export_file"
-                ((exported_count++))
-            fi
-        fi
-    done < <(iptables -t nat -L PREROUTING -n)
-    
+
+    cat "$RULES_DB" >> "$export_file"
+    local exported_count
+    exported_count=$(grep -cve '^[[:space:]]*$' "$RULES_DB" 2>/dev/null || echo 0)
     echo -e "${GREEN}✓ 已导出 $exported_count 条规则到 $export_file${NC}"
     log_message "INFO" "导出规则: $exported_count 条到 $export_file"
 }
@@ -2987,7 +3134,7 @@ edit_rules() {
 # 删除指定规则
 delete_specific_rule() {
     local iptables_cmd=$(get_iptables_cmd)
-    # 收集所有 UDP REDIRECT 规则（包含脚本与外部）
+    # 只收集带项目标记的 REDIRECT 规则，禁止管理外部规则。
     local rules=()
     local origins=()
     while read -r line; do
@@ -3002,7 +3149,7 @@ delete_specific_rule() {
         else
             origins+=("外部")
         fi
-    done < <($iptables_cmd -t nat -L PREROUTING --line-numbers | grep "REDIRECT")
+    done < <($iptables_cmd -t nat -L PREROUTING --line-numbers | grep "REDIRECT" | grep -F "$RULE_COMMENT")
 
     if [ ${#rules[@]} -eq 0 ]; then
         echo -e "${YELLOW}没有可删除的规则${NC}"
@@ -3074,6 +3221,9 @@ delete_specific_rule() {
             log_message "ERROR" "删除规则失败: 行号 $rule_num"
         fi
     done
+
+    sync_rule_model_from_kernel || log_message "WARNING" "删除后同步规则模型失败"
+    clear_iptables_cache
 }
 
 # 修改规则端口
@@ -3102,18 +3252,16 @@ toggle_rule_status() {
 # 智能恢复默认设置
 restore_defaults() {
     echo -e "${BLUE}恢复选项:${NC}"
-    echo "1. 仅删除端口映射规则"
-    echo "2. 删除规则并恢复备份"
-    echo "3. 完全重置iptables (危险)"
-    echo "4. 返回主菜单"
+    echo "1. 仅删除项目端口映射规则"
+    echo "2. 从项目规则备份恢复"
+    echo "3. 返回主菜单"
     
-    read -p "请选择恢复方式 [1-4]: " restore_choice
+    read -p "请选择恢复方式 [1-3]: " restore_choice
     
     case $restore_choice in
         1) remove_mapping_rules ;;
-        2) remove_and_restore ;;
-        3) full_reset_iptables ;;
-        4) return ;;
+        2) restore_from_backup ;;
+        3) return ;;
         *) echo -e "${RED}无效选择${NC}" ;;
     esac
 }
@@ -3161,12 +3309,12 @@ remove_mapping_rules() {
     
     echo -e "\n${GREEN}删除完成: 成功 $deleted_count 条, 失败 $failed_count 条${NC}"
     log_message "INFO" "批量删除规则: 成功=$deleted_count, 失败=$failed_count"
+    sync_rule_model_from_kernel || log_message "WARNING" "批量删除后同步规则模型失败"
+    clear_iptables_cache
     
-    if [ $deleted_count -gt 0 ]; then
-        read -p "是否永久保存当前状态? (y/n): " save_choice
-        if [[ "$save_choice" == "y" || "$save_choice" == "Y" ]]; then
-            save_rules
-        fi
+    if [ $deleted_count -gt 0 ] && command -v systemctl >/dev/null 2>&1 && \
+       systemctl is-enabled "$PERSISTENCE_SERVICE" >/dev/null 2>&1; then
+        echo -e "${GREEN}项目持久化服务已启用，删除结果已同步到统一规则模型。${NC}"
     fi
 }
 
@@ -3635,7 +3783,7 @@ uninstall_dependencies() {
 }
 
 # 完全卸载功能
-complete_uninstall() {
+legacy_complete_uninstall() {
     echo -e "${RED}========================================${NC}"
     echo -e "${RED}      完全卸载模式${NC}"
     echo -e "${RED}========================================${NC}"
@@ -4245,7 +4393,7 @@ partial_uninstall() {
 }
 
 # 主卸载菜单
-uninstall_script() {
+legacy_uninstall_script() {
     echo -e "${RED}========================================${NC}"
     echo -e "${RED}      卸载端口映射脚本${NC}"
     echo -e "${RED}========================================${NC}"
@@ -4293,7 +4441,7 @@ show_enhanced_help() {
     echo "• 批量规则导入/导出"
     echo "• 实时流量监控和统计"
     echo "• 全面系统诊断功能"
-    echo "• 多种持久化方案支持"
+    echo "• 项目专属、幂等的 systemd 持久化"
     echo "• 增强的错误处理和日志"
     echo "• IPv4/IPv6 双栈支持"
     echo "• 性能优化和缓存机制"
@@ -4345,8 +4493,8 @@ show_enhanced_help() {
     echo "└───────────────────────────────────┘"
     echo "┌─ 持久化配置 ───────────────────────┐"
     echo "│ 10. 永久保存当前规则               │"
-    echo "│ 11. 检查和修复持久化配置           │"
-    echo "│ 12. 测试持久化配置                 │"
+    echo "│ 11. 持久化检查/显式修复            │"
+    echo "│ 12. 非破坏性持久化测试             │"
     echo "└───────────────────────────────────┘"
     echo "┌─ 系统管理 ─────────────────────────┐"
     echo "│ 13. 帮助信息 (当前页面)            │"
@@ -4372,7 +4520,7 @@ show_enhanced_help() {
     echo
     echo -e "${CYAN}🆘 故障排除:${NC}"
     echo "• 规则不生效: 检查防火墙设置和 iptables 服务状态"
-    echo "• 重启后丢失: 运行 '11. 检查和修复持久化配置'"
+    echo "• 重启后丢失: 运行 '11. 持久化检查/显式修复'"
     echo "• 端口冲突: 脚本会自动检测并提示解决方案"
     echo "• 权限问题: 确保以 root 用户运行脚本"
     echo
@@ -4391,6 +4539,10 @@ show_version() {
     echo "支持: Hysteria2, Xray, V2Ray, iperf, 通用端口转发"
     echo
     echo "更新日志:"
+    echo "v5.0 - 项目边界与统一规则模型"
+    echo "     • 持久化只恢复项目拥有的规则"
+    echo "     • 启动检查与显式修复分离"
+    echo "     • 卸载不再接管系统防火墙文件或依赖"
     echo "v4.0 - 🚀 重大更新: 全面代码重构和功能增强"
     echo "     • 修复所有已知问题和安全漏洞"
     echo "     • 增强错误处理和输入验证"
@@ -4824,7 +4976,7 @@ show_main_menu() {
     echo
     echo -e "${BLUE}其他选项:${NC}"
     echo " 10. 永久保存当前规则"
-    echo " 11. 检查和修复持久化配置"
+    echo " 11. 持久化检查/显式修复"
     echo " 12. 测试持久化配置"
     echo " 13. 帮助信息"
     echo " 14. 版本信息"
@@ -4863,15 +5015,15 @@ create_sample_config() {
     local sample_file="$CONFIG_DIR/sample_rules.conf"
     
     cat > "$sample_file" << EOF
-# UDP端口映射规则配置文件示例
-# 格式: start_port:end_port:service_port
+# Port Mapping Manager 统一规则模型示例
+# 格式: IP版本|协议|起始端口|结束端口|目标端口
 # 
 # Hysteria2 标准配置
-6000:7000:3000
+4|udp|6000|7000|3000
 # Hysteria2 备用配置  
-8000:9000:4000
-# 大范围映射
-10000:12000:5000
+4|udp|8000|9000|4000
+# IPv6 TCP 映射
+6|tcp|10000|12000|5000
 # 
 # 注释行以#开头，空行将被忽略
 EOF
@@ -4902,7 +5054,7 @@ show_backup_menu() {
 }
 
 # 列出备份文件
-list_backups() {
+legacy_list_backups() {
     echo -e "${BLUE}可用备份文件:${NC}"
     local backups=($(ls -1t "$BACKUP_DIR"/iptables_backup_*.rules 2>/dev/null))
     
@@ -4917,6 +5069,427 @@ list_backups() {
         local date=$(echo "$file" | sed 's/iptables_backup_\(.*\)\.rules/\1/' | sed 's/_/ /g')
         echo "$((i+1)). $date ($size)"
     done
+}
+
+# --- 项目规则备份与恢复 -----------------------------------------------------
+backup_rules() {
+    local backup_file
+    mkdir -p "$BACKUP_DIR" || return 1
+    sync_rule_model_from_kernel || return 1
+    backup_file="$BACKUP_DIR/owned_rules_$(date +%Y%m%d_%H%M%S)_$$.db"
+    cp "$RULES_DB" "$backup_file" || return 1
+    LAST_BACKUP_FILE="$backup_file"
+    chmod 600 "$backup_file" 2>/dev/null || true
+    cleanup_old_backups
+    echo -e "${GREEN}✓ 项目规则已备份到: $backup_file${NC}"
+}
+
+# 兼容旧调用点；统一模型是唯一规则配置来源，不再生成 mappings.conf。
+save_mapping_config() {
+    rule_model_add "$IP_VERSION" "${4:-udp}" "$1" "$2" "$3"
+}
+
+cleanup_old_backups() {
+    local max_backups=${MAX_BACKUPS:-10}
+    local backup_count excess
+    backup_count=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'owned_rules_*.db' 2>/dev/null | wc -l)
+    if [ "$backup_count" -gt "$max_backups" ]; then
+        excess=$((backup_count - max_backups))
+        find "$BACKUP_DIR" -maxdepth 1 -type f -name 'owned_rules_*.db' -printf '%T@ %p\n' 2>/dev/null | \
+            sort -n | head -n "$excess" | cut -d' ' -f2- | while IFS= read -r file; do rm -f -- "$file"; done
+    fi
+}
+
+list_backups() {
+    local files=() file
+    while IFS= read -r file; do files+=("$file"); done < <(
+        find "$BACKUP_DIR" -maxdepth 1 -type f -name 'owned_rules_*.db' -printf '%T@ %p\n' 2>/dev/null | \
+            sort -nr | cut -d' ' -f2-
+    )
+    [ ${#files[@]} -gt 0 ] || { echo -e "${YELLOW}未找到项目规则备份${NC}"; return 0; }
+    for i in "${!files[@]}"; do
+        echo "$((i+1)). $(basename "${files[$i]}") ($(grep -cve '^[[:space:]]*$' "${files[$i]}" 2>/dev/null || echo 0) 条规则)"
+    done
+}
+
+restore_from_backup() {
+    local files=() file choice selected current_backup had_model=false
+    while IFS= read -r file; do files+=("$file"); done < <(
+        find "$BACKUP_DIR" -maxdepth 1 -type f -name 'owned_rules_*.db' -printf '%T@ %p\n' 2>/dev/null | \
+            sort -nr | cut -d' ' -f2-
+    )
+    [ ${#files[@]} -gt 0 ] || { echo -e "${YELLOW}未找到项目规则备份${NC}"; return 1; }
+    list_backups
+    read -p "选择要恢复的备份序号: " choice
+    [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#files[@]} ] || return 1
+    selected=${files[$((choice-1))]}
+    validate_rule_model_file "$selected" || { echo -e "${RED}备份格式无效${NC}"; return 1; }
+    read -p "只替换项目拥有的规则，确认恢复? (y/N): " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || return 0
+
+    current_backup=$(mktemp) || return 1
+    if [ -f "$RULES_DB" ]; then
+        cp "$RULES_DB" "$current_backup"
+        had_model=true
+    fi
+    if delete_all_owned_rules && cp "$selected" "$RULES_DB" && create_restore_script && "$RESTORE_SCRIPT"; then
+        rm -f "$current_backup"
+        clear_iptables_cache
+        echo -e "${GREEN}✓ 项目规则恢复成功${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}恢复失败，正在恢复项目规则数据库${NC}"
+    delete_all_owned_rules >/dev/null 2>&1 || true
+    if [ "$had_model" = true ]; then
+        cp "$current_backup" "$RULES_DB"
+    else
+        : > "$RULES_DB"
+    fi
+    rm -f "$current_backup"
+    create_restore_script && "$RESTORE_SCRIPT" >/dev/null 2>&1 || true
+    return 1
+}
+
+interactive_cleanup_backups() {
+    local files=() file choices sel
+    while IFS= read -r file; do files+=("$file"); done < <(
+        find "$BACKUP_DIR" -maxdepth 1 -type f -name 'owned_rules_*.db' -printf '%T@ %p\n' 2>/dev/null | \
+            sort -nr | cut -d' ' -f2-
+    )
+    [ ${#files[@]} -gt 0 ] || { echo -e "${YELLOW}未找到项目规则备份${NC}"; return 0; }
+    list_backups
+    read -p "输入要删除的序号（空格分隔），或输入 all: " choices
+    if [ "$choices" = all ]; then
+        for file in "${files[@]}"; do rm -f -- "$file"; done
+        return 0
+    fi
+    choices=$(printf '%s\n' "$choices" | tr -cs '0-9' ' ')
+    for sel in $choices; do
+        if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#files[@]} ]; then
+            rm -f -- "${files[$((sel-1))]}"
+        fi
+    done
+}
+
+# --- 项目专属持久化实现 -----------------------------------------------------
+# 以下定义替代旧版的全量 iptables-save/restore 方案。持久化只读取 RULES_DB，
+# 只创建带 RULE_COMMENT 的 REDIRECT 规则，不接管系统其他防火墙规则。
+create_restore_script() {
+    mkdir -p "$CONFIG_DIR" || return 1
+    cat > "$RESTORE_SCRIPT" <<EOF
+#!/bin/bash
+set -u
+
+RULES_DB="$RULES_DB"
+RULE_COMMENT="$RULE_COMMENT"
+LOG_FILE="$LOG_FILE"
+
+log_restore() {
+    printf '[%s] [pmm-restore] %s\n' "\$(date '+%Y-%m-%d %H:%M:%S')" "\$1" >> "\$LOG_FILE" 2>/dev/null || true
+}
+
+[ -f "\$RULES_DB" ] || { log_restore "规则数据库不存在，无需恢复"; exit 0; }
+failures=0
+
+while IFS='|' read -r ip_version protocol start_port end_port target_port extra; do
+    [ -z "\${ip_version}\${protocol}\${start_port}\${end_port}\${target_port}\${extra}" ] && continue
+    if [ -n "\${extra:-}" ] || ! [[ "\$ip_version" =~ ^[46]$ ]] || ! [[ "\$protocol" =~ ^(tcp|udp)$ ]] ||
+       ! [[ "\$start_port" =~ ^[0-9]+$ ]] || ! [[ "\$end_port" =~ ^[0-9]+$ ]] || ! [[ "\$target_port" =~ ^[0-9]+$ ]]; then
+        log_restore "忽略无效记录: \$ip_version|\$protocol|\$start_port|\$end_port|\$target_port"
+        failures=1
+        continue
+    fi
+
+    [ "\$ip_version" = "6" ] && cmd=ip6tables || cmd=iptables
+    command -v "\$cmd" >/dev/null 2>&1 || { log_restore "命令不存在: \$cmd"; failures=1; continue; }
+
+    if "\$cmd" -t nat -C PREROUTING -p "\$protocol" --dport "\$start_port:\$end_port" \
+        -m comment --comment "\$RULE_COMMENT" -j REDIRECT --to-port "\$target_port" 2>/dev/null; then
+        continue
+    fi
+
+    if ! "\$cmd" -t nat -A PREROUTING -p "\$protocol" --dport "\$start_port:\$end_port" \
+        -m comment --comment "\$RULE_COMMENT" -j REDIRECT --to-port "\$target_port"; then
+        log_restore "恢复失败: IPv\$ip_version \$protocol \$start_port-\$end_port -> \$target_port"
+        failures=1
+    fi
+done < "\$RULES_DB"
+
+exit "\$failures"
+EOF
+    chmod 700 "$RESTORE_SCRIPT"
+}
+
+cleanup_legacy_persistence_hooks() {
+    local changed=false temp_file service_file service_name
+
+    # 只移除明确引用本项目旧恢复脚本的 root crontab 行。
+    if command -v crontab >/dev/null 2>&1 && crontab -l >/dev/null 2>&1; then
+        temp_file=$(mktemp) || return 1
+        crontab -l 2>/dev/null | grep -Fv "$CONFIG_DIR/restore-rules.sh" > "$temp_file" || true
+        if ! cmp -s "$temp_file" <(crontab -l 2>/dev/null); then
+            crontab "$temp_file" && changed=true
+        fi
+        rm -f "$temp_file"
+    fi
+
+    # 对共享文件只删除本项目写入的精确行，不删除文件本身。
+    if [ -f /etc/rc.local ] && grep -Fq "$CONFIG_DIR/restore-rules.sh" /etc/rc.local; then
+        temp_file=$(mktemp) || return 1
+        grep -Fv "$CONFIG_DIR/restore-rules.sh" /etc/rc.local | \
+            grep -Fv '# Port Mapping Manager - 恢复 iptables 规则' > "$temp_file" || true
+        cat "$temp_file" > /etc/rc.local && changed=true
+        rm -f "$temp_file"
+    fi
+
+    if [ -f /etc/network/if-up.d/iptables-restore ] && \
+       grep -Eq "Port Mapping Manager|$CONFIG_DIR/restore-rules.sh" /etc/network/if-up.d/iptables-restore; then
+        rm -f /etc/network/if-up.d/iptables-restore && changed=true
+    fi
+
+    # 旧服务名不具备唯一性，只有内容明确指向本项目时才删除。
+    for service_name in udp-port-mapping.service iptables-restore.service; do
+        service_file="/etc/systemd/system/$service_name"
+        if [ -f "$service_file" ] && grep -Eq "$CONFIG_DIR|UDP Port Mapping Rules" "$service_file"; then
+            systemctl disable --now "$service_name" >/dev/null 2>&1 || true
+            rm -f "$service_file"
+            changed=true
+        fi
+    done
+
+    [ "$changed" = true ] && command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload || true
+}
+
+setup_systemd_service() {
+    command -v systemctl >/dev/null 2>&1 || {
+        echo -e "${RED}当前系统不支持 systemd，无法配置项目持久化服务${NC}"
+        return 1
+    }
+    create_restore_script || return 1
+
+    cat > "$PERSISTENCE_SERVICE_FILE" <<EOF
+[Unit]
+Description=Port Mapping Manager owned rules
+After=network-online.target
+Wants=network-online.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=$RESTORE_SCRIPT
+RemainAfterExit=yes
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload || return 1
+    systemctl enable "$PERSISTENCE_SERVICE" || return 1
+    systemctl start "$PERSISTENCE_SERVICE"
+}
+
+check_persistence_config() {
+    local issues=0
+    echo -e "${BLUE}========== 持久化只读检查 ==========${NC}"
+
+    if validate_rule_model_file; then
+        echo -e "${GREEN}✓ 统一规则数据库有效: $RULES_DB${NC}"
+    else
+        echo -e "${YELLOW}⚠ 规则数据库不存在或格式无效${NC}"
+        ((issues++))
+    fi
+
+    if [ -x "$RESTORE_SCRIPT" ] && bash -n "$RESTORE_SCRIPT" 2>/dev/null; then
+        echo -e "${GREEN}✓ 项目恢复脚本有效${NC}"
+    else
+        echo -e "${YELLOW}⚠ 项目恢复脚本缺失或无效${NC}"
+        ((issues++))
+    fi
+
+    if [ -f "$PERSISTENCE_SERVICE_FILE" ] && grep -Fq "$RESTORE_SCRIPT" "$PERSISTENCE_SERVICE_FILE"; then
+        echo -e "${GREEN}✓ 项目专属 systemd 服务文件有效${NC}"
+    else
+        echo -e "${YELLOW}⚠ 项目专属 systemd 服务未配置${NC}"
+        ((issues++))
+    fi
+
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled "$PERSISTENCE_SERVICE" >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ $PERSISTENCE_SERVICE 已启用${NC}"
+    else
+        echo -e "${YELLOW}⚠ $PERSISTENCE_SERVICE 未启用${NC}"
+        ((issues++))
+    fi
+
+    if grep -RqsF "$CONFIG_DIR/restore-rules.sh" /etc/systemd/system /etc/rc.local /etc/network/if-up.d 2>/dev/null || \
+       { command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -Fq "$CONFIG_DIR/restore-rules.sh"; }; then
+        echo -e "${YELLOW}⚠ 检测到旧版持久化启动项；显式修复时可安全迁移${NC}"
+        ((issues++))
+    fi
+
+    echo "检查完成：发现 $issues 个问题。本操作没有修改系统。"
+    [ "$issues" -eq 0 ]
+}
+
+repair_persistence_config() {
+    echo -e "${BLUE}========== 显式修复持久化 ==========${NC}"
+    echo "此操作将同步项目规则、创建 $PERSISTENCE_SERVICE，并清理明确属于本项目的旧启动项。"
+    read -p "确认执行修复? (y/N): " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "已取消修复"; return 0; }
+
+    sync_rule_model_from_kernel || return 1
+    cleanup_legacy_persistence_hooks || return 1
+    if setup_systemd_service; then
+        echo -e "${GREEN}✓ 项目专属持久化已修复${NC}"
+        return 0
+    fi
+    echo -e "${RED}✗ 持久化修复失败${NC}"
+    return 1
+}
+
+check_and_fix_persistence() {
+    echo "1. 只读检查（不修改系统）"
+    echo "2. 显式修复"
+    echo "3. 返回"
+    read -p "请选择 [1-3]: " persistence_choice
+    case "$persistence_choice" in
+        1) check_persistence_config ;;
+        2) repair_persistence_config ;;
+        3) return 0 ;;
+        *) echo -e "${RED}无效选择${NC}"; return 1 ;;
+    esac
+}
+
+save_rules() {
+    echo -e "${BLUE}正在持久化项目拥有的规则...${NC}"
+    sync_rule_model_from_kernel || return 1
+    cleanup_legacy_persistence_hooks || return 1
+    if setup_systemd_service; then
+        echo -e "${GREEN}✓ 已持久化 $(grep -cve '^[[:space:]]*$' "$RULES_DB" 2>/dev/null || echo 0) 条项目规则${NC}"
+        return 0
+    fi
+    return 1
+}
+
+verify_persistence_config() {
+    check_persistence_config
+}
+
+test_persistence_config() {
+    echo -e "${BLUE}========== 非破坏性持久化测试 ==========${NC}"
+    check_persistence_config || return 1
+    echo "测试将幂等执行项目恢复脚本，不会清空或覆盖系统规则。"
+    read -p "确认测试? (y/N): " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || return 0
+    if "$RESTORE_SCRIPT"; then
+        echo -e "${GREEN}✓ 恢复脚本执行成功${NC}"
+        clear_iptables_cache
+        return 0
+    fi
+    echo -e "${RED}✗ 恢复脚本执行失败${NC}"
+    return 1
+}
+
+# --- 项目边界内的卸载实现 ---------------------------------------------------
+delete_all_owned_rules() {
+    local ip_version iptables_cmd line_num deleted=0 failed=0
+
+    for ip_version in 4 6; do
+        iptables_cmd=$(get_iptables_cmd "$ip_version")
+        command -v "$iptables_cmd" >/dev/null 2>&1 || continue
+
+        while true; do
+            line_num=$("$iptables_cmd" -t nat -L PREROUTING --line-numbers -n 2>/dev/null | \
+                grep -F "$RULE_COMMENT" | head -n1 | awk '{print $1}')
+            [ -n "$line_num" ] || break
+            if "$iptables_cmd" -t nat -D PREROUTING "$line_num"; then
+                ((deleted++))
+            else
+                ((failed++))
+                break
+            fi
+        done
+    done
+
+    clear_iptables_cache
+    echo "已删除 $deleted 条项目规则，失败 $failed 条。"
+    [ "$failed" -eq 0 ]
+}
+
+remove_owned_systemd_services() {
+    local service_name service_file changed=false
+    command -v systemctl >/dev/null 2>&1 || return 0
+
+    if [ -f "$PERSISTENCE_SERVICE_FILE" ]; then
+        systemctl disable --now "$PERSISTENCE_SERVICE" >/dev/null 2>&1 || true
+        rm -f "$PERSISTENCE_SERVICE_FILE" || return 1
+        changed=true
+    fi
+
+    # 兼容清理旧版本服务，但必须先验证文件确实指向本项目。
+    for service_name in udp-port-mapping.service iptables-restore.service; do
+        service_file="/etc/systemd/system/$service_name"
+        if [ -f "$service_file" ] && grep -Eq "$CONFIG_DIR|UDP Port Mapping Rules" "$service_file"; then
+            systemctl disable --now "$service_name" >/dev/null 2>&1 || true
+            rm -f "$service_file" || return 1
+            changed=true
+        fi
+    done
+
+    [ "$changed" = true ] && systemctl daemon-reload || true
+}
+
+remove_owned_launchers() {
+    local launcher
+    for launcher in /usr/local/bin/pmm /usr/bin/pmm; do
+        if [ -f "$launcher" ] && grep -Fq '/etc/port_mapping_manager/port_mapping_manager.sh' "$launcher"; then
+            rm -f "$launcher" || return 1
+        fi
+    done
+}
+
+complete_uninstall() {
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${RED}卸载需要 root 权限，请使用 sudo pmm --uninstall${NC}"
+        return 1
+    fi
+    echo -e "${RED}========================================${NC}"
+    echo -e "${RED}      安全卸载 Port Mapping Manager${NC}"
+    echo -e "${RED}========================================${NC}"
+    echo "卸载只会删除："
+    echo "  • 带有 $RULE_COMMENT 标记的 IPv4/IPv6 规则"
+    echo "  • 本项目的 systemd 服务、恢复脚本、配置、日志和启动器"
+    echo "  • 旧版本明确写入的 crontab/rc.local/if-up 启动项"
+    echo
+    echo "不会删除 /etc/iptables/rules.*，不会禁用系统 netfilter-persistent，"
+    echo "不会卸载 iptables 或其他软件包，也不会修改第三方防火墙规则。"
+    read -p "输入 UNINSTALL_PMM 确认卸载: " confirm
+    [ "$confirm" = "UNINSTALL_PMM" ] || { echo "已取消卸载"; return 0; }
+
+    local failures=0
+    delete_all_owned_rules || ((failures++))
+    remove_owned_systemd_services || ((failures++))
+    cleanup_legacy_persistence_hooks || ((failures++))
+    remove_owned_launchers || ((failures++))
+
+    if [ -d "$CONFIG_DIR" ]; then
+        rm -rf "$CONFIG_DIR" || ((failures++))
+    fi
+    if [ -f "$LOG_FILE" ]; then
+        rm -f "$LOG_FILE" || ((failures++))
+    fi
+
+    if [ "$failures" -eq 0 ]; then
+        echo -e "${GREEN}✓ 项目资源已安全卸载${NC}"
+        return 0
+    fi
+    echo -e "${YELLOW}⚠ 卸载完成，但有 $failures 个步骤失败，请查看输出${NC}"
+    return 1
+}
+
+uninstall_script() {
+    complete_uninstall
 }
 
 # 主程序初始化
@@ -4940,13 +5513,11 @@ initialize_script() {
     # 记录启动
     log_message "INFO" "脚本启动 v$SCRIPT_VERSION"
     
-    # 自动检查和修复持久化配置
-    echo -e "${BLUE}正在检查持久化配置...${NC}"
-    if ! check_and_fix_persistence; then
-        echo -e "${YELLOW}⚠ 持久化配置检查发现问题，请手动检查${NC}"
-        echo -e "${YELLOW}  可以选择菜单中的 '11. 检查和修复持久化配置' 选项${NC}"
+    # 启动阶段禁止隐式修复、安装软件或修改系统启动项。
+    # 这里只执行本地规则数据库的只读验证；修复必须由用户从菜单 11 显式触发。
+    if [ -f "$RULES_DB" ] && ! validate_rule_model_file; then
+        log_message "WARNING" "规则数据库格式无效，请从菜单 11 显式检查"
     fi
-    echo
     
     # 显示系统信息
     if [ "$VERBOSE_MODE" = true ]; then
@@ -5020,8 +5591,18 @@ while [[ $# -gt 0 ]]; do
             AUTO_BACKUP=false
             shift
             ;;
+        --ip-version)
+            if [[ "${2:-}" =~ ^[46]$ ]]; then
+                IP_VERSION=$2
+                shift 2
+            else
+                echo "--ip-version 需要参数 4 或 6"
+                exit 1
+            fi
+            ;;
         --uninstall)
             uninstall_script
+            exit $?
             ;;
         *)
             echo "未知参数: $1"
@@ -5034,7 +5615,7 @@ done
 # 主程序执行
 main() {
     # 初始化
-    initialize_script
+    initialize_script || return 1
     
     # 进入主循环
     main_loop
@@ -5042,5 +5623,7 @@ main() {
 
 
 
-# 启动脚本
-main "$@"
+# 启动脚本；PMM_SOURCE_ONLY=true 供只读测试加载函数定义。
+if [ "${PMM_SOURCE_ONLY:-false}" != "true" ]; then
+    main "$@"
+fi

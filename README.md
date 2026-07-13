@@ -1,15 +1,15 @@
 # Port-Mapping-Manage
 
-[![Version](https://img.shields.io/badge/version-4.2-blue)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/port_mapping_manager.sh)
+[![Version](https://img.shields.io/badge/version-5.0-blue)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/port_mapping_manager.sh)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/pjy02/Port-Mapping-Manage/blob/main/LICENSE)
 
-> 🚀 **v4.2 重大更新** - 强大且易用的 iptables 端口映射管理脚本，支持 **TCP / UDP** 协议、IPv4/IPv6 双栈、批量操作、规则持久化、实时流量监控、智能诊断等企业级特性。
+> 🚀 **v5.0 安全架构更新** - 使用统一规则模型和项目专属持久化服务管理 TCP/UDP、IPv4/IPv6 端口映射，不再接管系统完整防火墙规则。
 
 ---
 
 ## 📑 项目简介
 
-本脚本旨在简化 Linux 服务器上的大范围端口转发配置与管理，特别适用于 **Hysteria2 / Xray / V2Ray / iperf** 等需要映射大量端口的应用场景。经过 v4.2 全面重构与持续优化，现已成为功能完善、稳定可靠的企业级端口管理解决方案。
+本脚本旨在简化 Linux 服务器上的大范围端口转发配置与管理，特别适用于 **Hysteria2 / Xray / V2Ray / iperf** 等需要映射大量端口的应用场景。v5.0 将规则、持久化和卸载统一到明确的项目资源边界内。
 
 ### 🌟 核心特性
 
@@ -20,7 +20,7 @@
 * **📊 实时监控**：内置流量统计、速率监控和连接状态检测
 * **🛡️ 安全可靠**：增强的输入验证、自动备份、智能恢复机制
 * **🔧 智能诊断**：全面的系统检测、问题诊断和自动修复
-* **⚙️ 持久化配置**：多种持久化方案，确保重启后规则自动恢复
+* **⚙️ 专属持久化**：只恢复带项目标记的规则，不覆盖 Docker、UFW、firewalld 等第三方规则
 * **🚀 性能优化**：缓存机制、批量处理，大幅提升执行效率
 * **🌐 广泛兼容**：支持 Debian / Ubuntu / CentOS / Rocky / AlmaLinux 等主流发行版
 
@@ -41,6 +41,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/re
 | ---- | ---- |
 | `-v, --verbose` | 显示更多调试信息 |
 | `--no-backup` | 禁用自动备份 |
+| `--ip-version 4\|6` | 指定启动时使用的 IP 版本 |
 | `-h, --help` | 查看帮助 |
 | `--version` | 显示脚本版本 |
 
@@ -69,8 +70,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/re
 | 序号 | 功能 | 说明 |
 | ---- | ---- | ---- |
 | 10 | 永久保存当前规则 | 配置规则持久化 |
-| 11 | 检查和修复持久化配置 | 诊断并修复持久化问题 |
-| 12 | 测试持久化配置 | 验证持久化配置有效性 |
+| 11 | 持久化检查/显式修复 | 只读检查，或经确认后显式修复 |
+| 12 | 测试持久化配置 | 幂等、非破坏性地验证项目规则恢复 |
 
 ### 系统管理
 | 序号 | 功能 | 说明 |
@@ -98,22 +99,30 @@ bash <(curl -fsSL https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/re
 
 ## 📂 批量导入示例文件
 
-脚本可读取以下格式的配置文件批量导入规则：
+统一规则模型包含 IP 版本、协议、起止端口和目标端口：
 
 ```text:sample_rules.conf
-# 格式: start_port:end_port:service_port
-6000:7000:3000
-8000:9000:4000
-10000:12000:5000
+# 格式: IP版本|协议|起始端口|结束端口|目标端口
+4|udp|6000|7000|3000
+4|tcp|8000|9000|4000
+6|udp|10000|12000|5000
 ```
+
+旧版 `start_port:end_port:service_port` 格式仍可导入，导入时按当前 IP 版本和 UDP 协议处理。
 
 ---
 
 ## 🛡️ 备份与恢复
 
-* **自动备份**：每次更改 iptables 前自动备份到 `backups/` 目录，默认保留 10 份
+* **自动备份**：每次更改前只备份项目规则模型到 `backups/`，默认保留 10 份
 * **选择性清理**：在备份管理菜单输入序号（支持空格/逗号等任意分隔）或输入 `all` 一键清空
-* **恢复备份**：按序号选择需要恢复的备份文件，支持覆盖当前全部规则
+* **恢复备份**：只替换带项目标记的规则，不覆盖系统或第三方防火墙规则
+
+## ⚙️ 持久化边界
+
+v5.0 使用 `/etc/port_mapping_manager/rules.db` 作为唯一持久化数据源，并通过 `pmm-rules.service` 幂等恢复规则。启动脚本只做只读验证，不会自动安装软件、创建服务或修改启动项；所有修复都必须在菜单 11 中显式确认。
+
+新版本不会写入或删除 `/etc/iptables/rules.v4`、`rules.v6`，也不会创建 crontab、`rc.local` 或网络接口 fallback。显式修复会定向迁移旧版本明确属于本项目的启动项。
 
 ---
 
@@ -156,7 +165,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/ma
 pmm --uninstall
 ```
 
-或在主菜单输入 `99` 按提示卸载，并选择是否保留备份文件。
+或在主菜单输入 `99` 按提示卸载。卸载只删除带项目 comment 的规则、`pmm-rules.service`、项目配置和启动器；不会禁用系统 `netfilter-persistent`、删除全局防火墙文件或卸载依赖包。
 
 ---
 
@@ -171,6 +180,14 @@ pmm --uninstall
 ---
 
 ## 📰 更新日志
+
+### v5.0 - 🔒 项目边界与统一模型 (2026-07-13)
+
+- 统一规则模型：`IP版本|协议|起始端口|结束端口|目标端口`
+- 持久化只恢复项目拥有的规则，不再保存或覆盖完整 iptables 状态
+- 启动阶段只做只读验证，检查与修复彻底分离
+- 安全卸载仅清理项目规则、服务、配置和明确属于项目的旧启动项
+- 批量导入导出、备份恢复完整保留 IP 版本和协议信息
 
 ### v4.2 - 🌐 公网IP检测增强 (2025-05-20)
 
@@ -221,6 +238,7 @@ pmm --uninstall
 
 | 版本 | 变更 | 日期 |
 | ---- | ---- | ---- |
+| 5.0  | 项目专属持久化、统一规则模型与安全卸载 | 2026-07-13 |
 | 4.2  | 公网IP检测增强 | 2025-05-20 |
 | 4.1  | 完全卸载与更新检测优化 | 2025-05-17 |
 | 4.0  | 全面重构，增强稳定性与诊断能力 | 2025-01-10 |
