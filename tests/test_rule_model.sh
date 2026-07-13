@@ -53,6 +53,14 @@ cat > "$TEST_ROOT/bin/iptables" <<'MOCK'
 set -u
 state=${PMM_TEST_STATE:?}
 args="$*"
+if [[ " $args " == *" -L PREROUTING "* ]]; then
+    if [ "$(basename "$0")" = ip6tables ]; then
+        cat "${PMM_TEST_CACHE_V6:?}"
+    else
+        cat "${PMM_TEST_CACHE_V4:?}"
+    fi
+    exit 0
+fi
 if [[ " $args " == *" -S PREROUTING "* ]]; then
     if [ "$(basename "$0")" = ip6tables ]; then
         cat "${PMM_TEST_RULES_V6:?}"
@@ -87,6 +95,8 @@ export PMM_TEST_STATE="$TEST_ROOT/kernel-state"
 touch "$PMM_TEST_STATE"
 export PMM_TEST_RULES_V4="$TEST_ROOT/rules-v4"
 export PMM_TEST_RULES_V6="$TEST_ROOT/rules-v6"
+export PMM_TEST_CACHE_V4="$TEST_ROOT/cache-v4"
+export PMM_TEST_CACHE_V6="$TEST_ROOT/cache-v6"
 cat > "$PMM_TEST_RULES_V4" <<'EOF'
 -A PREROUTING -p udp -m udp --dport 6000:7000 -m comment --comment udp-port-mapping-script-v4 -j REDIRECT --to-ports 3000
 -A PREROUTING -p tcp -m tcp --dport 9999 -j REDIRECT --to-ports 9998
@@ -94,7 +104,17 @@ EOF
 cat > "$PMM_TEST_RULES_V6" <<'EOF'
 -A PREROUTING -p tcp -m tcp --dport 443 -m comment --comment udp-port-mapping-script-v4 -j REDIRECT --to-ports 8443
 EOF
+printf 'Chain PREROUTING\nnum target prot source destination\n1 REDIRECT udp 0.0.0.0/0 0.0.0.0/0 udp dpts:6000:7000 /* udp-port-mapping-script-v4 */ redir ports 3000\n' > "$PMM_TEST_CACHE_V4"
+printf 'Chain PREROUTING\nnum target prot source destination\n1 REDIRECT tcp ::/0 ::/0 tcp dpt:443 /* udp-port-mapping-script-v4 */ redir ports 8443\n' > "$PMM_TEST_CACHE_V6"
 export PATH="$TEST_ROOT/bin:$PATH"
+
+clear_iptables_cache
+cache_iptables_rules 4 > "$TEST_ROOT/cache-out-v4"
+cache_iptables_rules 6 > "$TEST_ROOT/cache-out-v6"
+grep -Fq 'dpts:6000:7000' "$TEST_ROOT/cache-out-v4" || fail "IPv4 cache content missing"
+! grep -Fq 'dpt:443' "$TEST_ROOT/cache-out-v4" || fail "IPv6 data leaked into IPv4 cache"
+grep -Fq 'dpt:443' "$TEST_ROOT/cache-out-v6" || fail "IPv6 cache content missing"
+! grep -Fq 'dpts:6000:7000' "$TEST_ROOT/cache-out-v6" || fail "IPv4 data leaked into IPv6 cache"
 
 sync_rule_model_from_kernel
 assert_eq "$(wc -l < "$RULES_DB" | tr -d ' ')" "2"
@@ -119,4 +139,18 @@ grep -Fq -- '--comment udp-port-mapping-script-v4' "$PMM_TEST_STATE" || fail "ow
 grep -Fq -- '-p udp --dport 6000:7000' "$PMM_TEST_STATE" || fail "IPv4 UDP rule missing"
 grep -Fq -- '-p tcp --dport 443:443' "$PMM_TEST_STATE" || fail "IPv6 TCP rule missing"
 
-echo "PASS: unified rule model and owned-rule restore"
+cat > "$TEST_ROOT/import.conf" <<'EOF'
+4|tcp|8000|8001|8080
+6|udp|9000|9001|9090
+EOF
+import_rules_from_file "$TEST_ROOT/import.conf"
+assert_eq "${IMPORT_SUCCESS_COUNT:-0}" "2"
+assert_eq "${IMPORT_ERROR_COUNT:-0}" "0"
+grep -Fq -- '-p tcp --dport 8000:8001' "$PMM_TEST_STATE" || fail "batch IPv4 TCP rule missing"
+grep -Fq -- '-p udp --dport 9000:9001' "$PMM_TEST_STATE" || fail "batch IPv6 UDP rule missing"
+
+export_rules_to_file "$TEST_ROOT/export.conf"
+grep -Fxq '4|udp|6000|7000|3000' "$TEST_ROOT/export.conf" || fail "exported IPv4 record missing"
+grep -Fxq '6|tcp|443|443|8443' "$TEST_ROOT/export.conf" || fail "exported IPv6 record missing"
+
+echo "PASS: rule model, dual-stack cache, batch I/O, backup and restore"

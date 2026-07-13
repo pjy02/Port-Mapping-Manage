@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-and-network-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck iproute2 iptables
+
+      - name: Bash syntax
+        run: |
+          bash -n port_mapping_manager.sh
+          bash -n install_pmm.sh
+          bash -n pmm
+          bash -n tests/test_rule_model.sh
+          bash -n tests/test_netns_integration.sh
+          bash -n tests/test_supply_chain.sh
+
+      - name: ShellCheck
+        run: |
+          shellcheck --severity=error --external-sources \
+            port_mapping_manager.sh install_pmm.sh pmm \
+            tests/test_rule_model.sh tests/test_netns_integration.sh \
+            tests/test_supply_chain.sh
+
+      - name: Rule model tests
+        run: bash tests/test_rule_model.sh
+
+      - name: Supply-chain verification tests
+        run: bash tests/test_supply_chain.sh
+
+      - name: Network namespace integration
+        run: sudo bash tests/test_netns_integration.sh
