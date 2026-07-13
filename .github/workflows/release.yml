@@ -29,8 +29,10 @@ jobs:
       - name: Test and build release assets
         env:
           VERSION: ${{ github.ref_name }}
+          RELEASE_SIGNING_KEY: ${{ secrets.PMM_RELEASE_SIGNING_KEY }}
         run: |
           [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]
+          test -n "$RELEASE_SIGNING_KEY"
           go test ./...
           go vet ./...
           bash -n install_pmm.sh
@@ -40,9 +42,19 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=true -ldflags "$ldflags" -o dist/pmm-linux-amd64 ./cmd/pmm
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=true -ldflags "$ldflags" -o dist/pmm-linux-arm64 ./cmd/pmm
           cp install_pmm.sh dist/install_pmm.sh
-          (cd dist && sha256sum pmm-linux-amd64 pmm-linux-arm64 > release-manifest.sha256)
-          (cd dist && sha256sum release-manifest.sha256 > release-manifest.sha256.sha256)
+          cp release-signing-public.pem dist/release-signing-public.pem
+          printf '%s' "$RELEASE_SIGNING_KEY" > "$RUNNER_TEMP/pmm-release-signing.pem"
+          chmod 0600 "$RUNNER_TEMP/pmm-release-signing.pem"
+          openssl pkey -in "$RUNNER_TEMP/pmm-release-signing.pem" -pubout -out "$RUNNER_TEMP/derived-public.pem"
+          cmp <(openssl pkey -pubin -in release-signing-public.pem -outform DER) \
+              <(openssl pkey -pubin -in "$RUNNER_TEMP/derived-public.pem" -outform DER)
+          (cd dist && sha256sum pmm-linux-amd64 pmm-linux-arm64 install_pmm.sh > release-manifest.sha256)
+          openssl dgst -sha256 -sign "$RUNNER_TEMP/pmm-release-signing.pem" \
+            -out dist/release-manifest.sha256.sig dist/release-manifest.sha256
+          openssl dgst -sha256 -verify release-signing-public.pem \
+            -signature dist/release-manifest.sha256.sig dist/release-manifest.sha256
           (cd dist && sha256sum install_pmm.sh > install_pmm.sh.sha256)
+          rm -f "$RUNNER_TEMP/pmm-release-signing.pem" "$RUNNER_TEMP/derived-public.pem"
 
       - name: Create immutable-tag release
         env:
@@ -52,7 +64,8 @@ jobs:
             dist/pmm-linux-amd64 \
             dist/pmm-linux-arm64 \
             dist/release-manifest.sha256 \
-            dist/release-manifest.sha256.sha256 \
+            dist/release-manifest.sha256.sig \
+            dist/release-signing-public.pem \
             dist/install_pmm.sh \
             dist/install_pmm.sh.sha256 \
             --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

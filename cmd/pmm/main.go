@@ -226,10 +226,14 @@ func (c cli) sample(args []string) error {
 }
 
 func (c cli) update(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return errors.New("update requires check or install")
-	}
 	manager := updater.Manager{BinaryPath: c.paths.Binary, TrustPath: c.paths.Trust}
+	if len(args) == 0 {
+		if err := manager.Install(ctx, "latest", ""); err != nil {
+			return err
+		}
+		fmt.Fprintln(c.stdout, "已安装签名验证通过的最新稳定版本。")
+		return nil
+	}
 	switch args[0] {
 	case "check":
 		latest, err := manager.Check(ctx, version.Version)
@@ -241,18 +245,22 @@ func (c cli) update(ctx context.Context, args []string) error {
 		}
 		fmt.Fprintf(c.stdout, "当前版本: %s，最新版本: %s\n", latest.Current, latest.Latest)
 		if latest.Available {
-			fmt.Fprintln(c.stdout, "发现新版本；安装时必须提供独立确认的清单 SHA-256。")
+			fmt.Fprintln(c.stdout, "发现新版本；运行 sudo pmm update 安装签名验证通过的版本。")
 		}
 		return nil
 	case "install":
 		flags := flag.NewFlagSet("update install", flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
-		ref := flags.String("ref", "", "immutable release tag")
-		manifestSHA := flags.String("manifest-sha256", "", "trusted release manifest SHA-256")
+		ref := flags.String("ref", "latest", "latest or immutable release tag")
+		manifestSHA := flags.String("manifest-sha256", "", "optional independently pinned manifest SHA-256")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		return manager.Install(ctx, *ref, *manifestSHA)
+		if err := manager.Install(ctx, *ref, *manifestSHA); err != nil {
+			return err
+		}
+		fmt.Fprintln(c.stdout, "更新完成；已验证发布签名和二进制摘要。")
+		return nil
 	default:
 		return fmt.Errorf("unknown update command %q", args[0])
 	}
@@ -827,7 +835,7 @@ func (c cli) help() {
   address [--ip 4|6] [--refresh]
   persistence check|enable|repair|disable|test
   migrate [--source auto|kernel|database] [--execute]
-  update check|install --ref vX.Y.Z --manifest-sha256 SHA256
+  update [check|install [--ref latest|vX.Y.Z] [--manifest-sha256 SHA256]]
   repair plan|reconcile --yes
   uninstall [--keep-data] [--yes]
   menu

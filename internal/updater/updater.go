@@ -3,14 +3,20 @@ package updater
 import (
 	"bufio"
 	"context"
+	"crypto"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -22,12 +28,16 @@ import (
 
 const repository = "pjy02/Port-Mapping-Manage"
 
+//go:embed release-signing-public.pem
+var releasePublicKeyPEM []byte
+
 var releaseRefPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$`)
 
 type Trust struct {
-	ReleaseRef     string    `json:"release_ref"`
-	ManifestSHA256 string    `json:"manifest_sha256"`
-	InstalledAt    time.Time `json:"installed_at"`
+	ReleaseRef      string    `json:"release_ref"`
+	ManifestSHA256  string    `json:"manifest_sha256"`
+	PublicKeySHA256 string    `json:"public_key_sha256"`
+	InstalledAt     time.Time `json:"installed_at"`
 }
 
 type Latest struct {
@@ -38,12 +48,14 @@ type Latest struct {
 }
 
 type Manager struct {
-	Client     *http.Client
-	BinaryPath string
-	TrustPath  string
-	BaseURL    string
-	APIURL     string
-	Now        func() time.Time
+	Client         *http.Client
+	BinaryPath     string
+	TrustPath      string
+	BaseURL        string
+	APIURL         string
+	PublicKeyPEM   []byte
+	ValidateBinary func(string) error
+	Now            func() time.Time
 }
 
 func (m Manager) Check(ctx context.Context, current string) (Latest, error) {
@@ -83,15 +95,24 @@ func (m Manager) Install(ctx context.Context, releaseRef, manifestDigest string)
 	if runtime.GOOS != "linux" {
 		return errors.New("self-update is supported only on Linux")
 	}
+	if releaseRef == "" || releaseRef == "latest" {
+		latest, err := m.Check(ctx, "")
+		if err != nil {
+			return err
+		}
+		releaseRef = latest.Latest
+	}
 	if !releaseRefPattern.MatchString(releaseRef) {
 		return errors.New("release ref must be an immutable semantic-version tag")
 	}
 	manifestDigest = strings.ToLower(manifestDigest)
-	if len(manifestDigest) != 64 {
-		return errors.New("a 64-character trusted manifest SHA-256 is required")
-	}
-	if _, err := hex.DecodeString(manifestDigest); err != nil {
-		return errors.New("trusted manifest SHA-256 is invalid")
+	if manifestDigest != "" {
+		if len(manifestDigest) != 64 {
+			return errors.New("manifest SHA-256 pin must contain 64 characters")
+		}
+		if _, err := hex.DecodeString(manifestDigest); err != nil {
+			return errors.New("manifest SHA-256 pin is invalid")
+		}
 	}
 	arch := runtime.GOARCH
 	if arch != "amd64" && arch != "arm64" {
@@ -106,8 +127,20 @@ func (m Manager) Install(ctx context.Context, releaseRef, manifestDigest string)
 	if err != nil {
 		return err
 	}
-	if digest(manifest) != manifestDigest {
-		return errors.New("release manifest does not match the trusted SHA-256")
+	signature, err := m.download(ctx, base+"/"+releaseRef+"/release-manifest.sha256.sig", 64<<10)
+	if err != nil {
+		return err
+	}
+	publicKey, publicKeyDigest, err := m.releasePublicKey()
+	if err != nil {
+		return err
+	}
+	if err := verifyManifestSignature(publicKey, manifest, signature); err != nil {
+		return err
+	}
+	manifestActual := digest(manifest)
+	if manifestDigest != "" && manifestActual != manifestDigest {
+		return errors.New("release manifest does not match the additionally pinned SHA-256")
 	}
 	expected, err := manifestEntry(manifest, filename)
 	if err != nil {
@@ -120,7 +153,35 @@ func (m Manager) Install(ctx context.Context, releaseRef, manifestDigest string)
 	if digest(binary) != expected {
 		return errors.New("downloaded binary SHA-256 does not match the verified manifest")
 	}
-	return m.installVerified(binary, Trust{ReleaseRef: releaseRef, ManifestSHA256: manifestDigest, InstalledAt: m.now().UTC()})
+	return m.installVerified(binary, Trust{ReleaseRef: releaseRef, ManifestSHA256: manifestActual, PublicKeySHA256: publicKeyDigest, InstalledAt: m.now().UTC()})
+}
+
+func (m Manager) releasePublicKey() (*rsa.PublicKey, string, error) {
+	keyPEM := m.PublicKeyPEM
+	if len(keyPEM) == 0 {
+		keyPEM = releasePublicKeyPEM
+	}
+	block, rest := pem.Decode(keyPEM)
+	if block == nil || len(strings.TrimSpace(string(rest))) != 0 || block.Type != "PUBLIC KEY" {
+		return nil, "", errors.New("release public key is invalid")
+	}
+	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse release public key: %w", err)
+	}
+	key, ok := parsed.(*rsa.PublicKey)
+	if !ok || key.N.BitLen() < 3072 {
+		return nil, "", errors.New("release public key must be RSA 3072 bits or stronger")
+	}
+	return key, digest(block.Bytes), nil
+}
+
+func verifyManifestSignature(key *rsa.PublicKey, manifest, signature []byte) error {
+	sum := sha256.Sum256(manifest)
+	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, sum[:], signature); err != nil {
+		return errors.New("release manifest signature is invalid")
+	}
+	return nil
 }
 
 func (m Manager) installVerified(binary []byte, trust Trust) error {
@@ -152,6 +213,9 @@ func (m Manager) installVerified(binary []byte, trust Trust) error {
 	if err := storage.WriteFileAtomic(candidate, binary, 0o755); err != nil {
 		return err
 	}
+	if err := m.validateBinary(candidate); err != nil {
+		return fmt.Errorf("verified update payload cannot execute: %w", err)
+	}
 	hadPrevious := false
 	if _, err := os.Stat(m.BinaryPath); err == nil {
 		if err := os.Rename(m.BinaryPath, rollback); err != nil {
@@ -173,6 +237,16 @@ func (m Manager) installVerified(binary []byte, trust Trust) error {
 		return fmt.Errorf("save trust anchor and rolled back binary: %w", err)
 	}
 	return nil
+}
+
+func (m Manager) validateBinary(path string) error {
+	if m.ValidateBinary != nil {
+		return m.ValidateBinary(path)
+	}
+	command := exec.Command(path, "version")
+	command.Stdout = io.Discard
+	command.Stderr = io.Discard
+	return command.Run()
 }
 
 func verifySafeDirectory(path string) error {

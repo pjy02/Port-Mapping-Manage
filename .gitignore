@@ -1,6 +1,7 @@
 /.gocache/
 /.gopath/
 /dist/
+/.release-keys/
 /pmm.exe
 /pmm-v6
 *.test
