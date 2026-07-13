@@ -15,10 +15,12 @@ RULES_DB="$CONFIG_DIR/rules.db"
 RESTORE_SCRIPT="$CONFIG_DIR/restore-owned-rules.sh"
 PERSISTENCE_SERVICE="pmm-rules.service"
 PERSISTENCE_SERVICE_FILE="/etc/systemd/system/$PERSISTENCE_SERVICE"
+REPORT_DIR="$CONFIG_DIR/reports"
 LAST_BACKUP_FILE=""
 IMPORT_SUCCESS_COUNT=0
 IMPORT_ERROR_COUNT=0
 EXPORT_RULE_COUNT=0
+BATCH_BACKUP_FILE=""
 
 # 颜色定义
 readonly GREEN='\033[0;32m'
@@ -333,36 +335,19 @@ clear_iptables_cache() {
 # 批量获取端口状态（性能优化）
 batch_check_port_status() {
     local ports=("$@")
-    local tcp_ports=()
-    local udp_ports=()
-
     if [ ${#ports[@]} -eq 0 ]; then
         return 0
     fi
 
     log_message "DEBUG" "批量检查 ${#ports[@]} 个端口状态"
 
-    # 一次性获取所有监听端口
-    local tcp_listening=$(ss -tlnp 2>/dev/null | awk '{print $4}' | grep -o ':[0-9]*$' | sed 's/://' | sort -n | uniq)
-    local udp_listening=$(ss -ulnp 2>/dev/null | awk '{print $4}' | grep -o ':[0-9]*$' | sed 's/://' | sort -n | uniq)
-
-    # 检查每个端口
     for port_info in "${ports[@]}"; do
-        local port=$(echo "$port_info" | cut -d: -f1)
-        local protocol=$(echo "$port_info" | cut -d: -f2)
-
-        if [ "$protocol" = "tcp" ]; then
-            if echo "$tcp_listening" | grep -q "^${port}$"; then
-                echo "${port}:tcp:active"
-            else
-                echo "${port}:tcp:inactive"
-            fi
+        IFS=':' read -r port protocol ip_version <<< "$port_info"
+        ip_version=${ip_version:-$IP_VERSION}
+        if is_service_listening "$ip_version" "$protocol" "$port"; then
+            echo "${port}:${protocol}:${ip_version}:active"
         else
-            if echo "$udp_listening" | grep -q "^${port}$"; then
-                echo "${port}:udp:active"
-            else
-                echo "${port}:udp:inactive"
-            fi
+            echo "${port}:${protocol}:${ip_version}:inactive"
         fi
     done
 }
@@ -529,14 +514,17 @@ validate_port() {
 # 增强的端口占用检查
 check_port_in_use() {
     local port=$1
-    local detailed=${2:-false}
+    local protocol=${2:-udp}
+    local ip_version=${3:-$IP_VERSION}
+    local detailed=${4:-false}
+    local socket_info
 
-    if ss -ulnp | grep -q ":$port "; then
+    socket_info=$(get_listening_socket "$ip_version" "$protocol" "$port" 2>/dev/null || true)
+    if [ -n "$socket_info" ]; then
         if [ "$detailed" = true ]; then
-            local process_info=$(ss -ulnp | grep ":$port " | awk '{print $6}')
-            echo -e "${YELLOW}警告：端口 $port 已被占用 - $process_info${NC}"
+            echo -e "${YELLOW}警告：IPv${ip_version} ${protocol^^} 端口 $port 已被占用 - $socket_info${NC}"
         else
-            echo -e "${YELLOW}警告：端口 $port 可能已被占用。${NC}"
+            echo -e "${YELLOW}警告：IPv${ip_version} ${protocol^^} 端口 $port 可能已被占用。${NC}"
         fi
         return 0
     fi
@@ -548,18 +536,28 @@ check_port_conflicts() {
     local start_port=$1
     local end_port=$2
     local service_port=$3
+    local protocol=${4:-udp}
+    local ip_version=${5:-$IP_VERSION}
+    local existing_ip existing_protocol existing_start existing_end existing_target
 
-    # 根据当前IP版本获取对应的iptables命令
-    local iptables_cmd=$(get_iptables_cmd)
+    [ -n "$service_port" ] || true
+    while IFS='|' read -r existing_ip existing_protocol existing_start existing_end existing_target; do
+        [ -n "$existing_ip" ] || continue
+        if [ "$ip_version" = "$existing_ip" ] && [ "$protocol" = "$existing_protocol" ] && \
+           [ "$start_port" -le "$existing_end" ] && [ "$end_port" -ge "$existing_start" ]; then
+            echo -e "${YELLOW}与项目规则冲突: IPv${existing_ip}/${existing_protocol} ${existing_start}-${existing_end} -> ${existing_target}${NC}"
+            return 1
+        fi
+    done < <(extract_owned_rules)
 
-    # 检查现有iptables规则冲突
-    local conflicts=$($iptables_cmd -t nat -L PREROUTING -n | grep -E "dpt:($start_port|$end_port|$service_port)([^0-9]|$)")
-
-    if [ -n "$conflicts" ]; then
-        echo -e "${YELLOW}发现可能的端口冲突：${NC}"
-        echo "$conflicts"
-        return 1
-    fi
+    while IFS='|' read -r existing_ip existing_protocol existing_start existing_end; do
+        [ -n "$existing_ip" ] || continue
+        if [ "$ip_version" = "$existing_ip" ] && [ "$protocol" = "$existing_protocol" ] && \
+           [ "$start_port" -le "$existing_end" ] && [ "$end_port" -ge "$existing_start" ]; then
+            echo -e "${YELLOW}与外部 NAT 规则冲突: IPv${existing_ip}/${existing_protocol} ${existing_start}-${existing_end}${NC}"
+            return 1
+        fi
+    done < <(extract_external_nat_ranges)
 
     return 0
 }
@@ -668,6 +666,26 @@ extract_owned_rules() {
 
             if validate_rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$target_port"; then
                 rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$target_port"
+            fi
+        done < <("$iptables_cmd" -t nat -S PREROUTING 2>/dev/null)
+    done
+}
+
+extract_external_nat_ranges() {
+    local ip_version iptables_cmd line protocol ports start_port end_port
+    for ip_version in 4 6; do
+        iptables_cmd=$(get_iptables_cmd "$ip_version")
+        command -v "$iptables_cmd" >/dev/null 2>&1 || continue
+        while IFS= read -r line; do
+            [[ "$line" == *"--dport "* ]] || continue
+            [[ "$line" == *"$RULE_COMMENT"* ]] && continue
+            protocol=$(printf '%s\n' "$line" | sed -n 's/.* -p \(tcp\|udp\) .*/\1/p')
+            ports=$(printf '%s\n' "$line" | sed -n 's/.*--dport \([0-9][0-9]*\)\(:\([0-9][0-9]*\)\)\?.*/\1|\3/p')
+            start_port=${ports%%|*}
+            end_port=${ports#*|}
+            [ -n "$end_port" ] || end_port=$start_port
+            if [[ "$protocol" =~ ^(tcp|udp)$ ]] && [[ "$start_port" =~ ^[0-9]+$ ]] && [[ "$end_port" =~ ^[0-9]+$ ]]; then
+                printf '%s|%s|%s|%s\n' "$ip_version" "$protocol" "$start_port" "$end_port"
             fi
         done < <("$iptables_cmd" -t nat -S PREROUTING 2>/dev/null)
     done
@@ -825,7 +843,7 @@ show_rules_for_version() {
 
         # 收集端口检查信息
         if [ -n "$redirect_port" ] && [ -n "$protocol" ]; then
-            ports_to_check+=("$redirect_port:$protocol")
+            ports_to_check+=("$redirect_port:$protocol:$ip_version")
         fi
 
         ((rule_count++))
@@ -844,7 +862,7 @@ show_rules_for_version() {
 
         local status="🔴"
         if [ -n "$redirect_port" ] && [ -n "$protocol" ]; then
-            if echo "$port_status_map" | grep -q "^${redirect_port}:${protocol}:active$"; then
+            if echo "$port_status_map" | grep -q "^${redirect_port}:${protocol}:${ip_version}:active$"; then
                 status="🟢"
             fi
         fi
@@ -886,53 +904,14 @@ show_current_rules() {
 check_rule_active() {
     local port_range=$1
     local service_port=$2
-    local protocol=${3:-"udp"}  # 添加协议参数，默认为udp
+    local protocol=${3:-udp}
+    local ip_version=${4:-$IP_VERSION}
 
-    # 根据协议检查服务端口是否在监听
-    if [ "$protocol" = "tcp" ]; then
-        if ss -tlnp | grep -q ":$service_port "; then
-            return 0
-        fi
-    else
-        if ss -ulnp | grep -q ":$service_port "; then
-            return 0
-        fi
-    fi
-    return 1
+    [ -n "$port_range" ] || true
+    get_listening_socket "$ip_version" "$protocol" "$service_port" >/dev/null 2>&1
 }
 
 # 流量统计显示
-show_traffic_stats() {
-    echo -e "\n${CYAN}流量统计概览：${NC}"
-
-    local iptables_cmd=$(get_iptables_cmd $IP_VERSION)
-    if [ -z "$iptables_cmd" ]; then
-        return
-    fi
-
-        local total_packets=0
-        local total_bytes=0
-
-        # 获取NAT表统计信息
-        while read -r line; do
-            if echo "$line" | grep -q "$RULE_COMMENT"; then
-                local packets=$(echo "$line" | awk '{print $1}' | tr -d '[]')
-                local bytes=$(echo "$line" | awk '{print $2}' | tr -d '[]')
-                if [[ "$packets" =~ ^[0-9]+$ ]] && [[ "$bytes" =~ ^[0-9]+$ ]]; then
-                    total_packets=$((total_packets + packets))
-                    total_bytes=$((total_bytes + bytes))
-                fi
-            fi
-        done < <($iptables_cmd -t nat -L PREROUTING -v -n 2>/dev/null)
-
-    if [ "$total_packets" -gt 0 ] || [ "$total_bytes" -gt 0 ]; then
-        echo -e "${YELLOW}--- IPv${IP_VERSION} 流量 ---${NC}"
-        echo "总数据包: $total_packets"
-        echo "总字节数: $(format_bytes $total_bytes)"
-    fi
-}
-
-# 格式化字节显示
 format_bytes() {
     local bytes=$1
     if [ "$bytes" -gt 1073741824 ]; then
@@ -1028,9 +1007,9 @@ setup_mapping() {
         fi
 
         # 高级检查
-        check_port_in_use "$service_port" true
+        check_port_in_use "$service_port" "$protocol" "$IP_VERSION" true
 
-        if ! check_port_conflicts "$start_port" "$end_port" "$service_port"; then
+        if ! check_port_conflicts "$start_port" "$end_port" "$service_port" "$protocol" "$IP_VERSION"; then
             read -p "发现端口冲突，是否继续? (y/n): " continue_choice
             if [[ "$continue_choice" != "y" && "$continue_choice" != "Y" ]]; then
                 continue
@@ -1167,21 +1146,25 @@ import_rules_from_file() {
     local config_file=$1
     local legacy_ip_version=${2:-$IP_VERSION}
     local line_num=0
-    local success_count=0
-    local error_count=0
+    local raw_line ip_version protocol start_port end_port service_port extra record
+    local existing_record candidate existing_ip existing_protocol existing_start existing_end existing_target
+    local external_ip external_protocol external_start external_end
+    local candidate_ip candidate_protocol candidate_start candidate_end candidate_target
+    local success_count=0 error_count=0 backup_file
+    local records=() unique_records=()
 
     IMPORT_SUCCESS_COUNT=0
     IMPORT_ERROR_COUNT=0
 
     [ -f "$config_file" ] || return 1
 
+    # 阶段 1：完整解析，不执行任何 iptables 操作。
     while IFS= read -r raw_line || [ -n "$raw_line" ]; do
         line_num=$((line_num + 1))
 
         raw_line=${raw_line%$'\r'}
         [[ -z "$raw_line" || "$raw_line" =~ ^[[:space:]]*# ]] && continue
 
-        local ip_version protocol start_port end_port service_port extra
         if [[ "$raw_line" == *"|"* ]]; then
             IFS='|' read -r ip_version protocol start_port end_port service_port extra <<< "$raw_line"
         else
@@ -1193,20 +1176,94 @@ import_rules_from_file() {
 
         protocol=$(printf '%s' "$protocol" | tr '[:upper:]' '[:lower:]')
 
-        if [ -z "$extra" ] && validate_rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$service_port" && \
-           apply_rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$service_port"; then
-            success_count=$((success_count + 1))
-        else
+        if [ -n "$extra" ] || ! validate_rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$service_port" || \
+           { [ "$service_port" -ge "$start_port" ] && [ "$service_port" -le "$end_port" ]; }; then
             echo -e "${RED}第 $line_num 行无效，已跳过: $raw_line${NC}" >&2
             error_count=$((error_count + 1))
+            continue
         fi
+
+        record=$(rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$service_port")
+        records+=("$record")
     done < "$config_file"
+
+    # 任意格式错误都会使整个批次失败，不允许部分应用。
+    if [ "$error_count" -gt 0 ]; then
+        IMPORT_ERROR_COUNT=$error_count
+        return 1
+    fi
+
+    # 去重并验证批次内部及与现有项目规则的范围冲突。
+    while IFS= read -r record; do
+        [ -n "$record" ] && unique_records+=("$record")
+    done < <(printf '%s\n' "${records[@]}" | sed '/^$/d' | sort -u)
+
+    for candidate in "${unique_records[@]}"; do
+        IFS='|' read -r candidate_ip candidate_protocol candidate_start candidate_end candidate_target <<< "$candidate"
+
+        while IFS= read -r existing_record; do
+            [ -n "$existing_record" ] || continue
+            [ "$candidate" = "$existing_record" ] && continue
+            IFS='|' read -r existing_ip existing_protocol existing_start existing_end existing_target <<< "$existing_record"
+            if [ "$candidate_ip" = "$existing_ip" ] && [ "$candidate_protocol" = "$existing_protocol" ] && \
+               [ "$candidate_start" -le "$existing_end" ] && [ "$candidate_end" -ge "$existing_start" ]; then
+                echo -e "${RED}批量导入范围冲突: $candidate 与现有规则 $existing_record${NC}" >&2
+                IMPORT_ERROR_COUNT=1
+                return 1
+            fi
+        done < <(extract_owned_rules)
+
+        while IFS='|' read -r external_ip external_protocol external_start external_end; do
+            [ -n "$external_ip" ] || continue
+            if [ "$candidate_ip" = "$external_ip" ] && [ "$candidate_protocol" = "$external_protocol" ] && \
+               [ "$candidate_start" -le "$external_end" ] && [ "$candidate_end" -ge "$external_start" ]; then
+                echo -e "${RED}批量导入与外部 NAT 规则冲突: $candidate 与 IPv${external_ip}/${external_protocol} ${external_start}-${external_end}${NC}" >&2
+                IMPORT_ERROR_COUNT=1
+                return 1
+            fi
+        done < <(extract_external_nat_ranges)
+
+        for record in "${records[@]}"; do
+            [ "$record" = "$candidate" ] && continue
+            IFS='|' read -r ip_version protocol start_port end_port service_port <<< "$record"
+            if [ "$candidate_ip" = "$ip_version" ] && [ "$candidate_protocol" = "$protocol" ] && \
+               [ "$candidate_start" -le "$end_port" ] && [ "$candidate_end" -ge "$start_port" ]; then
+                echo -e "${RED}批次内部范围冲突: $candidate 与 $record${NC}" >&2
+                IMPORT_ERROR_COUNT=1
+                return 1
+            fi
+        done
+    done
+
+    [ ${#unique_records[@]} -gt 0 ] || return 0
+
+    # 阶段 2：只备份一次，然后执行全部规则。
+    backup_rules >/dev/null || { IMPORT_ERROR_COUNT=1; return 1; }
+    backup_file=$LAST_BACKUP_FILE
+    BATCH_BACKUP_FILE=$backup_file
+
+    for record in "${unique_records[@]}"; do
+        IFS='|' read -r ip_version protocol start_port end_port service_port <<< "$record"
+        if apply_rule_record "$ip_version" "$protocol" "$start_port" "$end_port" "$service_port"; then
+            success_count=$((success_count + 1))
+        else
+            echo -e "${RED}批量执行失败，正在回滚到批次前状态${NC}" >&2
+            if ! restore_rules_from_backup_file "$backup_file" >/dev/null 2>&1; then
+                echo -e "${RED}严重错误：批量导入失败，且无法恢复批次前备份 $backup_file${NC}" >&2
+                log_message "CRITICAL" "批量导入失败且回滚失败: $backup_file"
+            fi
+            clear_iptables_cache
+            IMPORT_SUCCESS_COUNT=0
+            IMPORT_ERROR_COUNT=1
+            return 1
+        fi
+    done
 
     clear_iptables_cache
     IMPORT_SUCCESS_COUNT=$success_count
     IMPORT_ERROR_COUNT=$error_count
     log_message "INFO" "批量导入: 成功=$success_count, 失败=$error_count"
-    [ "$error_count" -eq 0 ]
+    return 0
 }
 
 # 批量导入规则
@@ -1255,671 +1312,298 @@ batch_export_rules() {
 # --- 新增功能：诊断和监控 ---
 
 # 综合诊断功能
-diagnose_system() {
-    echo -e "${BLUE}=========================================${NC}"
-    echo -e "${BLUE}        系统诊断报告${NC}"
-    echo -e "${BLUE}=========================================${NC}"
+# --- 双栈诊断、监听与监控 ---------------------------------------------------
+get_listening_socket() {
+    local ip_version=$1 protocol=$2 port=$3
+    local family_flag protocol_flag
 
-    # 1. 系统信息
-    echo -e "\n${CYAN}1. 系统信息:${NC}"
-    echo "操作系统: $(uname -o)"
-    echo "内核版本: $(uname -r)"
-    echo "包管理器: $PACKAGE_MANAGER"
-    echo "持久化方法: $PERSISTENT_METHOD"
+    [ "$ip_version" = 6 ] && family_flag=-6 || family_flag=-4
+    [ "$protocol" = tcp ] && protocol_flag=-t || protocol_flag=-u
+    command -v ss >/dev/null 2>&1 || return 1
 
-    # 2. 依赖检查
-    echo -e "\n${CYAN}2. 依赖检查:${NC}"
-    local deps=("iptables" "iptables-save" "ss" "netfilter-persistent")
-    for dep in "${deps[@]}"; do
-        if command -v "$dep" &> /dev/null; then
-            echo "✓ $dep: 已安装"
-        else
-            echo "✗ $dep: 未安装"
-        fi
-    done
-
-    # 3. 内核模块检查
-    echo -e "\n${CYAN}3. 内核模块检查:${NC}"
-    local modules=("iptable_nat" "nf_nat" "nf_conntrack")
-    for module in "${modules[@]}"; do
-        if lsmod | grep -q "^$module"; then
-            echo "✓ $module: 已加载"
-        else
-            echo "✗ $module: 未加载"
-        fi
-    done
-
-    # 4. 端口监听状态
-    echo -e "\n${CYAN}4. 服务端口监听状态:${NC}"
-    local service_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u))
-
-    for port in "${service_ports[@]}"; do
-        if ss -ulnp | grep -q ":$port "; then
-            local process=$(ss -ulnp | grep ":$port " | awk '{print $6}' | head -1)
-            echo "✓ 端口 $port: 正在监听 - $process"
-        else
-            echo "✗ 端口 $port: 未监听"
-        fi
-    done
-
-    # 5. 防火墙状态
-    echo -e "\n${CYAN}5. 防火墙状态:${NC}"
-    if command -v ufw &> /dev/null && ufw status | grep -q "Status: active"; then
-        echo "⚠ UFW防火墙已启用，可能影响端口访问"
-        echo "建议检查UFW规则: ufw status verbose"
-    elif command -v firewalld &> /dev/null && firewall-cmd --state &> /dev/null; then
-        echo "⚠ firewalld防火墙已启用，可能影响端口访问"
-        echo "建议检查firewalld规则: firewall-cmd --list-all"
-    else
-        echo "✓ 未检测到活跃的防火墙服务"
-    fi
-
-    # 6. 规则统计
-    echo -e "\n${CYAN}6. 映射规则统计:${NC}"
-    local rule_count=$(iptables -t nat -L PREROUTING -n | grep -c "$RULE_COMMENT")
-    echo "活跃映射规则: $rule_count 条"
-
-    if [ "$rule_count" -gt 0 ]; then
-        echo "规则详情:"
-        show_current_rules
-    fi
-
-    # 7. 网络连通性测试
-    echo -e "\n${CYAN}7. 网络连通性测试:${NC}"
-    test_network_connectivity
-
-    # 8. 系统资源状态
-    echo -e "\n${CYAN}8. 系统资源状态:${NC}"
-    check_system_resources
-
-    # 9. 安全性检查
-    echo -e "\n${CYAN}9. 安全性检查:${NC}"
-    check_security_status
-
-    # 10. 性能建议
-    echo -e "\n${CYAN}10. 性能建议:${NC}"
-    if [ "$rule_count" -gt 50 ]; then
-        echo "⚠ 映射规则较多($rule_count条)，可能影响网络性能"
-        echo "建议: 定期清理不用的规则，或考虑使用负载均衡"
-    else
-        echo "✓ 规则数量合理"
-    fi
-
-    # 11. 故障排除建议
-    echo -e "\n${CYAN}11. 故障排除建议:${NC}"
-    provide_troubleshooting_suggestions
-
-    echo -e "\n${BLUE}=========================================${NC}"
-    echo -e "${BLUE}        诊断完成${NC}"
-    echo -e "${BLUE}=========================================${NC}"
-
-    # 询问是否生成详细报告
-    read -p "是否生成详细诊断报告到文件? (y/n): " generate_report
-    if [[ "$generate_report" =~ ^[Yy]$ ]]; then
-        generate_diagnostic_report
-    fi
+    ss -H -l -n -p "$family_flag" "$protocol_flag" 2>/dev/null | \
+        awk -v wanted=":$port" '{
+            for (i = 1; i <= NF; i++) {
+                if (length($i) >= length(wanted) && substr($i, length($i) - length(wanted) + 1) == wanted) {
+                    print
+                    exit
+                }
+            }
+        }'
 }
 
-# 网络连通性测试
+is_service_listening() {
+    [ -n "$(get_listening_socket "$1" "$2" "$3" 2>/dev/null)" ]
+}
+
+owned_rule_records() {
+    extract_owned_rules | sort -u
+}
+
+owned_rule_count() {
+    local wanted_version=${1:-all} wanted_protocol=${2:-all}
+    owned_rule_records | awk -F'|' -v version="$wanted_version" -v protocol="$wanted_protocol" '
+        (version == "all" || $1 == version) && (protocol == "all" || $2 == protocol) {count++}
+        END {print count+0}
+    '
+}
+
+collect_owned_traffic_stats() {
+    local ip_version iptables_cmd line packets bytes protocol port_info target_port
+    for ip_version in 4 6; do
+        iptables_cmd=$(get_iptables_cmd "$ip_version")
+        command -v "$iptables_cmd" >/dev/null 2>&1 || continue
+        while IFS= read -r line; do
+            [[ "$line" == *"$RULE_COMMENT"* ]] || continue
+            packets=$(awk '{print $1}' <<< "$line")
+            bytes=$(awk '{print $2}' <<< "$line")
+            protocol=$(awk '{print $4}' <<< "$line")
+            port_info=$(sed -n 's/.*dpts:\([0-9]*:[0-9]*\).*/\1/p' <<< "$line")
+            [ -n "$port_info" ] || port_info=$(sed -n 's/.*dpt:\([0-9]*\).*/\1/p' <<< "$line")
+            target_port=$(sed -n 's/.*redir ports \([0-9]*\).*/\1/p' <<< "$line")
+            [[ "$packets" =~ ^[0-9]+$ && "$bytes" =~ ^[0-9]+$ ]] || continue
+            printf '%s|%s|%s|%s|%s|%s\n' \
+                "$ip_version" "$protocol" "$port_info" "$target_port" "$packets" "$bytes"
+        done < <("$iptables_cmd" -t nat -L PREROUTING -v -n -x 2>/dev/null)
+    done
+}
+
+show_traffic_stats() {
+    local ip_version protocol port_info target_port packets bytes
+    local packets_v4=0 bytes_v4=0 packets_v6=0 bytes_v6=0
+    while IFS='|' read -r ip_version protocol port_info target_port packets bytes; do
+        [ -n "$ip_version" ] || continue
+        if [ "$ip_version" = 6 ]; then
+            packets_v6=$((packets_v6 + packets))
+            bytes_v6=$((bytes_v6 + bytes))
+        else
+            packets_v4=$((packets_v4 + packets))
+            bytes_v4=$((bytes_v4 + bytes))
+        fi
+    done < <(collect_owned_traffic_stats)
+
+    echo -e "\n${CYAN}双栈流量统计:${NC}"
+    echo "IPv4: $packets_v4 包 / $(format_bytes "$bytes_v4")"
+    echo "IPv6: $packets_v6 包 / $(format_bytes "$bytes_v6")"
+}
+
+show_owned_listening_status() {
+    local ip_version protocol start_port end_port target_port socket_info
+    while IFS='|' read -r ip_version protocol start_port end_port target_port; do
+        [ -n "$ip_version" ] || continue
+        socket_info=$(get_listening_socket "$ip_version" "$protocol" "$target_port" 2>/dev/null || true)
+        if [ -n "$socket_info" ]; then
+            echo -e "${GREEN}✓ IPv${ip_version} ${protocol^^} $target_port 正在监听${NC}"
+        else
+            echo -e "${RED}✗ IPv${ip_version} ${protocol^^} $target_port 未监听${NC}"
+        fi
+    done < <(owned_rule_records)
+}
+
 test_network_connectivity() {
-    # 检查网络接口状态
-    echo "网络接口状态:"
-    if command -v ip &> /dev/null; then
-        local interfaces=$(ip link show | grep "state UP" | awk -F': ' '{print $2}' | head -3)
-        if [ -n "$interfaces" ]; then
-            echo "$interfaces" | while read -r interface; do
-                echo "✓ $interface: UP"
-            done
+    local ip_version protocol start_port end_port target_port
+    echo "本地服务可用性（按协议和地址族）:"
+    while IFS='|' read -r ip_version protocol start_port end_port target_port; do
+        [ -n "$ip_version" ] || continue
+        if is_service_listening "$ip_version" "$protocol" "$target_port"; then
+            echo "✓ IPv${ip_version} ${protocol^^} $target_port 可用"
         else
-            echo "✗ 未发现活跃的网络接口"
+            echo "✗ IPv${ip_version} ${protocol^^} $target_port 无监听服务"
         fi
-    else
-        echo "⚠ ip命令不可用，跳过接口检查"
-    fi
-
-    # 测试本地回环
-    if ping -c 1 127.0.0.1 &> /dev/null; then
-        echo "✓ 本地回环: 正常"
-    else
-        echo "✗ 本地回环: 异常"
-    fi
-
-    # 测试映射端口连通性
-    local service_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u | head -5))
-    if [ ${#service_ports[@]} -gt 0 ]; then
-        echo "端口连通性测试:"
-        for port in "${service_ports[@]}"; do
-            if timeout 2 bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null; then
-                echo "✓ 端口 $port: 可连接"
-            else
-                echo "✗ 端口 $port: 无法连接"
-            fi
-        done
-    fi
+    done < <(owned_rule_records)
 }
 
-# 系统资源检查
 check_system_resources() {
-    # CPU使用率
-    if command -v top &> /dev/null; then
-        local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 2>/dev/null)
-        if [ -n "$cpu_usage" ]; then
-            echo "CPU使用率: ${cpu_usage}%"
-            if (( $(echo "$cpu_usage > 80" | bc -l 2>/dev/null || echo "0") )); then
-                echo "⚠ CPU使用率较高，可能影响网络性能"
-            fi
-        fi
-    fi
-
-    # 内存使用情况
-    if [ -f /proc/meminfo ]; then
-        local mem_total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-        local mem_available=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
-        if [ -n "$mem_total" ] && [ -n "$mem_available" ]; then
-            local mem_used=$((mem_total - mem_available))
-            local mem_percent=$((mem_used * 100 / mem_total))
+    local mem_total mem_available mem_used mem_percent
+    echo "系统负载: $(awk '{print $1, $2, $3}' /proc/loadavg 2>/dev/null || echo unknown)"
+    if [ -r /proc/meminfo ]; then
+        mem_total=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+        mem_available=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
+        if [ -n "$mem_total" ] && [ -n "$mem_available" ] && [ "$mem_total" -gt 0 ]; then
+            mem_used=$((mem_total - mem_available))
+            mem_percent=$((mem_used * 100 / mem_total))
             echo "内存使用率: ${mem_percent}% ($(format_bytes $((mem_used * 1024))))"
-            if [ "$mem_percent" -gt 90 ]; then
-                echo "⚠ 内存使用率过高，可能影响系统稳定性"
-            fi
         fi
-    fi
-
-    # 系统负载
-    if [ -f /proc/loadavg ]; then
-        local load_avg=$(cat /proc/loadavg | awk '{print $1}')
-        echo "系统负载 (1分钟): $load_avg"
-        local cpu_cores=$(nproc 2>/dev/null || echo "1")
-        if (( $(echo "$load_avg > $cpu_cores" | bc -l 2>/dev/null || echo "0") )); then
-            echo "⚠ 系统负载较高，可能影响响应速度"
-        fi
-    fi
-
-    # 网络统计
-    if [ -f /proc/net/dev ]; then
-        echo "网络接口流量统计:"
-        awk 'NR>2 && $2>0 {printf "  %s: RX %s TX %s\n", $1, $2, $10}' /proc/net/dev | head -3
     fi
 }
 
-# 安全性检查
 check_security_status() {
-    # 检查开放端口数量
-    local open_ports_count=0
-    if command -v ss &> /dev/null; then
-        open_ports_count=$(ss -tuln | grep -c "LISTEN")
-        echo "监听端口总数: $open_ports_count"
-        if [ "$open_ports_count" -gt 20 ]; then
-            echo "⚠ 开放端口较多，建议检查是否都是必需的"
-        fi
-    fi
-
-    # 检查映射端口范围
-    local mapped_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | grep -o "dpts:[0-9]*:[0-9]*" | cut -d: -f2-3))
-    local high_risk_ports=0
-    for port_range in "${mapped_ports[@]}"; do
-        local start_port=$(echo "$port_range" | cut -d: -f1)
-        local end_port=$(echo "$port_range" | cut -d: -f2)
-        local range_size=$((end_port - start_port + 1))
-        if [ "$range_size" -gt 100 ]; then
-            ((high_risk_ports++))
-        fi
-    done
-
-    if [ "$high_risk_ports" -gt 0 ]; then
-        echo "⚠ 发现 $high_risk_ports 个大范围端口映射，可能存在安全风险"
-        echo "建议: 尽量使用小范围或单端口映射"
+    local ip_version protocol start_port end_port target_port range_size high_risk=0
+    local dangerous_ports=" 22 23 1433 3306 3389 5900 " dangerous=()
+    while IFS='|' read -r ip_version protocol start_port end_port target_port; do
+        [ -n "$ip_version" ] || continue
+        range_size=$((end_port - start_port + 1))
+        [ "$range_size" -gt 100 ] && high_risk=$((high_risk + 1))
+        [[ "$dangerous_ports" == *" $target_port "* ]] && \
+            dangerous+=("IPv${ip_version}/${protocol}:$target_port")
+    done < <(owned_rule_records)
+    echo "大范围映射: $high_risk"
+    if [ ${#dangerous[@]} -gt 0 ]; then
+        echo -e "${YELLOW}敏感目标端口: ${dangerous[*]}${NC}"
     else
-        echo "✓ 端口映射范围合理"
-    fi
-
-    # 检查常见危险端口
-    local dangerous_ports=("22" "23" "3389" "5900" "1433" "3306")
-    local mapped_dangerous=()
-    for port in "${dangerous_ports[@]}"; do
-        if iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | grep -q "redir ports $port"; then
-            mapped_dangerous+=("$port")
-        fi
-    done
-
-    if [ ${#mapped_dangerous[@]} -gt 0 ]; then
-        echo "⚠ 发现映射了敏感端口: ${mapped_dangerous[*]}"
-        echo "建议: 确保这些服务有足够的安全防护"
-    else
-        echo "✓ 未发现映射敏感端口"
+        echo "未发现敏感目标端口"
     fi
 }
 
-# 故障排除建议
 provide_troubleshooting_suggestions() {
-    local suggestions=()
-
-    # 检查常见问题
-    if ! command -v iptables &> /dev/null; then
-        suggestions+=("安装iptables: $PACKAGE_MANAGER install iptables")
-    fi
-
-    if ! lsmod | grep -q "iptable_nat"; then
-        suggestions+=("加载NAT模块: modprobe iptable_nat")
-    fi
-
-    local rule_count=$(iptables -t nat -L PREROUTING -n | grep -c "$RULE_COMMENT")
-    if [ "$rule_count" -eq 0 ]; then
-        suggestions+=("当前无映射规则，使用选项1添加规则")
-    fi
-
-    # 检查服务监听
-    local service_ports=($(iptables -t nat -L PREROUTING -n | grep "$RULE_COMMENT" | sed -n 's/.*redir ports \([0-9]*\).*/\1/p' | sort -u))
-    local unlistened_ports=()
-    for port in "${service_ports[@]}"; do
-        if ! ss -ulnp | grep -q ":$port "; then
-            unlistened_ports+=("$port")
-        fi
-    done
-
-    if [ ${#unlistened_ports[@]} -gt 0 ]; then
-        suggestions+=("以下端口有映射但无服务监听: ${unlistened_ports[*]}")
-        suggestions+=("请启动相应服务或删除无用的映射规则")
-    fi
-
-    # 输出建议
-    if [ ${#suggestions[@]} -gt 0 ]; then
-        for suggestion in "${suggestions[@]}"; do
-            echo "💡 $suggestion"
-        done
+    local ip_version protocol start_port end_port target_port missing=()
+    while IFS='|' read -r ip_version protocol start_port end_port target_port; do
+        [ -n "$ip_version" ] || continue
+        is_service_listening "$ip_version" "$protocol" "$target_port" || \
+            missing+=("IPv${ip_version}/${protocol^^}:$target_port")
+    done < <(owned_rule_records)
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo -e "${YELLOW}存在映射但没有对应监听服务: ${missing[*]}${NC}"
     else
-        echo "✓ 未发现明显问题"
-    fi
-
-    # 提供快速修复选项
-    if [ ${#suggestions[@]} -gt 0 ]; then
-        echo ""
-        read -p "是否尝试自动修复部分问题? (y/n): " auto_fix
-        if [[ "$auto_fix" =~ ^[Yy]$ ]]; then
-            attempt_auto_fix
-        fi
+        echo "所有项目规则均有匹配地址族和协议的监听服务"
     fi
 }
 
-# 自动修复尝试
-attempt_auto_fix() {
-    echo "正在尝试自动修复..."
-
-    # 尝试加载必要的内核模块
-    local modules=("iptable_nat" "nf_nat" "nf_conntrack")
-    for module in "${modules[@]}"; do
-        if ! lsmod | grep -q "^$module"; then
-            echo "尝试加载模块: $module"
-            if modprobe "$module" 2>/dev/null; then
-                echo "✓ 成功加载 $module"
-            else
-                echo "✗ 无法加载 $module (可能需要root权限)"
-            fi
-        fi
-    done
-
-    # 检查并启用IP转发
-    if [ -f /proc/sys/net/ipv4/ip_forward ]; then
-        local ip_forward=$(cat /proc/sys/net/ipv4/ip_forward)
-        if [ "$ip_forward" != "1" ]; then
-            echo "尝试启用IP转发..."
-            if echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null; then
-                echo "✓ 已启用IP转发"
-            else
-                echo "✗ 无法启用IP转发 (需要root权限)"
-                echo "手动执行: echo 1 > /proc/sys/net/ipv4/ip_forward"
-            fi
-        fi
-    fi
-
-    echo "自动修复完成"
-}
-
-# 生成详细诊断报告
 generate_diagnostic_report() {
-    local report_file="$LOG_DIR/diagnostic_report_$(date +%Y%m%d_%H%M%S).txt"
-    register_temp_file "$report_file"
-
-    echo "正在生成详细诊断报告..."
-
+    local report_file ip_version protocol start_port end_port target_port status
+    mkdir -p "$REPORT_DIR" || return 1
+    report_file="$REPORT_DIR/diagnostic_report_$(date +%Y%m%d_%H%M%S).txt"
     {
-        echo "========================================="
-        echo "Port-Mapping-Manage 系统诊断报告"
-        echo "生成时间: $(date)"
-        echo "脚本版本: $SCRIPT_VERSION"
-        echo "========================================="
-        echo ""
-
-        # 重新运行所有诊断检查并输出到文件
-        echo "1. 系统信息:"
-        echo "操作系统: $(uname -o)"
-        echo "内核版本: $(uname -r)"
-        echo "包管理器: $PACKAGE_MANAGER"
-        echo "持久化方法: $PERSISTENT_METHOD"
-        echo ""
-
-        echo "2. 依赖检查:"
-        local deps=("iptables" "iptables-save" "ss" "netfilter-persistent")
-        for dep in "${deps[@]}"; do
-            if command -v "$dep" &> /dev/null; then
-                echo "✓ $dep: 已安装"
-            else
-                echo "✗ $dep: 未安装"
-            fi
-        done
-        echo ""
-
-        echo "3. 内核模块检查:"
-        local modules=("iptable_nat" "nf_nat" "nf_conntrack")
-        for module in "${modules[@]}"; do
-            if lsmod | grep -q "^$module"; then
-                echo "✓ $module: 已加载"
-            else
-                echo "✗ $module: 未加载"
-            fi
-        done
-        echo ""
-
-        echo "4. 当前映射规则:"
-        iptables -t nat -L PREROUTING -n --line-numbers | grep "$RULE_COMMENT" || echo "无映射规则"
-        echo ""
-
-        echo "5. 系统资源状态:"
-        if [ -f /proc/loadavg ]; then
-            echo "系统负载: $(cat /proc/loadavg)"
-        fi
-        if [ -f /proc/meminfo ]; then
-            echo "内存信息:"
-            grep -E "MemTotal|MemFree|MemAvailable" /proc/meminfo
-        fi
-        echo ""
-
-        echo "6. 网络接口状态:"
-        if command -v ip &> /dev/null; then
-            ip addr show | grep -E "^[0-9]+:|inet "
-        fi
-        echo ""
-
-        echo "7. 监听端口:"
-        if command -v ss &> /dev/null; then
-            ss -tuln | head -20
-        fi
-        echo ""
-
-        echo "========================================="
-        echo "报告生成完成"
-        echo "========================================="
-
+        echo "Port Mapping Manager diagnostic report"
+        echo "Generated: $(date -Is 2>/dev/null || date)"
+        echo "Version: $SCRIPT_VERSION"
+        echo "Kernel: $(uname -sr)"
+        echo
+        echo "Rule summary:"
+        echo "IPv4 TCP: $(owned_rule_count 4 tcp)"
+        echo "IPv4 UDP: $(owned_rule_count 4 udp)"
+        echo "IPv6 TCP: $(owned_rule_count 6 tcp)"
+        echo "IPv6 UDP: $(owned_rule_count 6 udp)"
+        echo
+        echo "Rules and listening state:"
+        while IFS='|' read -r ip_version protocol start_port end_port target_port; do
+            [ -n "$ip_version" ] || continue
+            if is_service_listening "$ip_version" "$protocol" "$target_port"; then status=listening; else status=not-listening; fi
+            echo "IPv${ip_version}|${protocol}|${start_port}|${end_port}|${target_port}|${status}"
+        done < <(owned_rule_records)
+        echo
+        echo "Traffic:"
+        collect_owned_traffic_stats
+        echo
+        echo "Listening sockets:"
+        ss -H -lntup 2>/dev/null || true
     } > "$report_file"
-
-    if [ -f "$report_file" ]; then
-        echo -e "${GREEN}✓ 诊断报告已生成: $report_file${NC}"
-        echo "报告大小: $(du -h "$report_file" | cut -f1)"
-
-        read -p "是否查看报告内容? (y/n): " view_report
-        if [[ "$view_report" =~ ^[Yy]$ ]]; then
-            echo -e "${CYAN}💡 提示: 查看报告时按 'q' 键退出，空格键翻页${NC}"
-            sleep 2
-            if command -v less &> /dev/null; then
-                less "$report_file"
-            else
-                echo -e "${YELLOW}使用 cat 显示报告内容 (按 Ctrl+C 可中断):${NC}"
-                cat "$report_file"
-            fi
-            echo -e "${GREEN}报告查看完成，返回主菜单${NC}"
-        fi
-    else
-        echo -e "${RED}✗ 报告生成失败${NC}"
-    fi
+    chmod 600 "$report_file" 2>/dev/null || true
+    echo -e "${GREEN}诊断报告已保存: $report_file${NC}"
 }
 
-# 增强的实时监控功能
+diagnose_system() {
+    local total
+    echo -e "${BLUE}========== 双栈系统诊断 ==========${NC}"
+    echo "系统: $(uname -sr)"
+    echo "IPv4 TCP规则: $(owned_rule_count 4 tcp)"
+    echo "IPv4 UDP规则: $(owned_rule_count 4 udp)"
+    echo "IPv6 TCP规则: $(owned_rule_count 6 tcp)"
+    echo "IPv6 UDP规则: $(owned_rule_count 6 udp)"
+    total=$(owned_rule_count)
+    echo "项目规则总数: $total"
+    echo
+    show_owned_listening_status
+    echo
+    show_traffic_stats
+    echo
+    check_system_resources
+    check_security_status
+    provide_troubleshooting_suggestions
+    echo
+    read -p "是否生成持久化诊断报告? (y/N): " generate_report
+    [[ "$generate_report" =~ ^[Yy]$ ]] && generate_diagnostic_report
+}
+
 monitor_traffic() {
-    echo -e "${BLUE}=========================================${NC}"
-    echo -e "${BLUE}        实时流量监控${NC}"
-    echo -e "${BLUE}=========================================${NC}"
-
-    # 监控选项菜单
-    echo -e "${CYAN}监控模式选择:${NC}"
-    echo "1. 简单模式 - 总体流量统计"
-    echo "2. 详细模式 - 按端口分组统计"
-    echo "3. 连接模式 - 活跃连接监控"
-    echo "4. 性能模式 - 系统资源监控"
-    echo "5. 返回主菜单"
-
-    read -p "请选择监控模式 [1-5]: " monitor_mode
-
-    case $monitor_mode in
+    echo "1. 双栈总流量"
+    echo "2. 双栈逐规则流量"
+    echo "3. TCP/UDP、IPv4/IPv6 连接与监听"
+    echo "4. 系统性能"
+    echo "5. 返回"
+    read -p "请选择 [1-5]: " monitor_mode
+    case "$monitor_mode" in
         1) monitor_simple ;;
         2) monitor_detailed ;;
         3) monitor_connections ;;
         4) monitor_performance ;;
         5) return ;;
-        *) echo -e "${RED}无效选择${NC}"; return ;;
+        *) return 1 ;;
     esac
 }
 
-# 简单模式监控
 monitor_simple() {
-    echo -e "${BLUE}简单模式监控 (按Ctrl+C退出)${NC}"
-    echo -e "${CYAN}时间\t\t数据包\t字节数\t\t速率\t\t连接数${NC}"
-    echo "--------------------------------------------------------------------"
-
-    local prev_packets=0
-    local prev_bytes=0
-    local iptables_cmd=$(get_iptables_cmd)
-
-    # 设置陷阱处理Ctrl+C
-    trap 'echo -e "\n${GREEN}监控已停止${NC}"; return' INT
-
+    local prev_packets=0 prev_bytes=0 current_packets current_bytes packet_rate byte_rate
+    local ip_version protocol port_info target_port packets bytes
+    trap 'echo; return' INT
     while true; do
-        local current_packets=0
-        local current_bytes=0
-        local connection_count=0
-
-        # 获取流量统计（优化：减少iptables调用）
-        local stats_output
-        if ! stats_output=$($iptables_cmd -t nat -L PREROUTING -v -n 2>/dev/null); then
-            echo -e "${RED}获取统计数据失败${NC}"
-            sleep 1
-            continue
-        fi
-
-        # 统计当前流量
-        while read -r line; do
-            if echo "$line" | grep -q "$RULE_COMMENT"; then
-                local packets=$(echo "$line" | awk '{print $1}' | tr -d '[]')
-                local bytes=$(echo "$line" | awk '{print $2}' | tr -d '[]')
-                if [[ "$packets" =~ ^[0-9]+$ ]] && [[ "$bytes" =~ ^[0-9]+$ ]]; then
-                    current_packets=$((current_packets + packets))
-                    current_bytes=$((current_bytes + bytes))
-                fi
-            fi
-        done <<< "$stats_output"
-
-        # 获取连接数
-        if command -v ss &> /dev/null; then
-            connection_count=$(ss -tuln | grep -c "LISTEN" 2>/dev/null || echo "0")
-        fi
-
-        # 计算速率
-        local packet_rate=$((current_packets - prev_packets))
-        local byte_rate=$((current_bytes - prev_bytes))
-
-        # 显示统计信息
-        printf "%s\t%8d\t%12s\t%10s/s\t%6d\n" \
-            "$(date '+%H:%M:%S')" \
-            "$current_packets" \
-            "$(format_bytes $current_bytes)" \
-            "$(format_bytes $byte_rate)" \
-            "$connection_count"
-
+        current_packets=0
+        current_bytes=0
+        while IFS='|' read -r ip_version protocol port_info target_port packets bytes; do
+            [ -n "$ip_version" ] || continue
+            current_packets=$((current_packets + packets))
+            current_bytes=$((current_bytes + bytes))
+        done < <(collect_owned_traffic_stats)
+        packet_rate=$((current_packets - prev_packets))
+        byte_rate=$((current_bytes - prev_bytes))
+        printf '%s packets=%d bytes=%s rate=%dpps/%s/s listeners=%d\n' \
+            "$(date '+%H:%M:%S')" "$current_packets" "$(format_bytes "$current_bytes")" \
+            "$packet_rate" "$(format_bytes "$byte_rate")" \
+            "$(ss -H -lntup 2>/dev/null | wc -l)"
         prev_packets=$current_packets
         prev_bytes=$current_bytes
-
         sleep 1
     done
-
-    trap - INT
 }
 
-# 详细模式监控
 monitor_detailed() {
-    echo -e "${BLUE}详细模式监控 (按Ctrl+C退出)${NC}"
-    echo -e "${CYAN}按端口分组的流量统计:${NC}"
-    echo "--------------------------------------------------------------------"
-
-    local iptables_cmd=$(get_iptables_cmd)
-    trap 'echo -e "\n${GREEN}监控已停止${NC}"; return' INT
-
+    local ip_version protocol port_info target_port packets bytes status
+    trap 'echo; return' INT
     while true; do
         clear
-        echo -e "${BLUE}详细流量监控 - $(date)${NC}"
-        echo "--------------------------------------------------------------------"
-        printf "%-10s %-15s %-12s %-12s %-10s\n" "端口" "协议" "数据包" "字节数" "状态"
-        echo "--------------------------------------------------------------------"
-
-        # 获取详细规则信息
-        local rules_output
-        if ! rules_output=$($iptables_cmd -t nat -L PREROUTING -v -n --line-numbers 2>/dev/null); then
-            echo -e "${RED}获取规则信息失败${NC}"
-            sleep 2
-            continue
-        fi
-
-        # 解析每个规则的统计信息
-        while read -r line; do
-            if echo "$line" | grep -q "$RULE_COMMENT"; then
-                local packets=$(echo "$line" | awk '{print $2}' | tr -d '[]')
-                local bytes=$(echo "$line" | awk '{print $3}' | tr -d '[]')
-                local protocol=$(echo "$line" | awk '{print $4}')
-                local port_info=$(echo "$line" | grep -o "dpts:[0-9]*:[0-9]*\|dpt:[0-9]*" | head -1)
-
-                if [[ "$packets" =~ ^[0-9]+$ ]] && [[ "$bytes" =~ ^[0-9]+$ ]]; then
-                    local port_display="$port_info"
-                    local status="活跃"
-                    if [ "$packets" -eq 0 ]; then
-                        status="空闲"
-                    fi
-
-                    printf "%-10s %-15s %-12s %-12s %-10s\n" \
-                        "$port_display" \
-                        "$protocol" \
-                        "$packets" \
-                        "$(format_bytes $bytes)" \
-                        "$status"
-                fi
-            fi
-        done <<< "$rules_output"
-
-        echo "--------------------------------------------------------------------"
-        echo -e "${CYAN}按 Ctrl+C 退出监控${NC}"
+        printf '%-5s %-5s %-15s %-8s %-12s %-12s %-14s\n' IP Proto Source Target Packets Bytes Listener
+        while IFS='|' read -r ip_version protocol port_info target_port packets bytes; do
+            [ -n "$ip_version" ] || continue
+            if is_service_listening "$ip_version" "$protocol" "$target_port"; then status=up; else status=down; fi
+            printf '%-5s %-5s %-15s %-8s %-12s %-12s %-14s\n' \
+                "IPv$ip_version" "$protocol" "$port_info" "$target_port" "$packets" \
+                "$(format_bytes "$bytes")" "$status"
+        done < <(collect_owned_traffic_stats)
         sleep 2
     done
-
-    trap - INT
 }
 
-# 连接模式监控
 monitor_connections() {
-    echo -e "${BLUE}连接监控模式 (按Ctrl+C退出)${NC}"
-
-    if ! command -v ss &> /dev/null; then
-        echo -e "${RED}错误: ss 命令不可用，无法监控连接${NC}"
-        return 1
-    fi
-
-    trap 'echo -e "\n${GREEN}监控已停止${NC}"; return' INT
-
+    trap 'echo; return' INT
     while true; do
         clear
-        echo -e "${BLUE}活跃连接监控 - $(date)${NC}"
-        echo "--------------------------------------------------------------------"
-
-        # 显示监听端口
-        echo -e "${CYAN}监听端口:${NC}"
-        ss -tuln | grep "LISTEN" | head -10
-
-        echo ""
-        echo -e "${CYAN}活跃连接 (前10个):${NC}"
-        ss -tun | grep "ESTAB" | head -10
-
-        echo ""
-        echo -e "${CYAN}连接统计:${NC}"
-        local listen_count=$(ss -tuln | grep -c "LISTEN" 2>/dev/null || echo "0")
-        local estab_count=$(ss -tun | grep -c "ESTAB" 2>/dev/null || echo "0")
-        local total_count=$(ss -tun | wc -l 2>/dev/null || echo "0")
-
-        echo "监听端口: $listen_count"
-        echo "已建立连接: $estab_count"
-        echo "总连接数: $total_count"
-
-        echo "--------------------------------------------------------------------"
-        echo -e "${CYAN}按 Ctrl+C 退出监控${NC}"
+        echo "IPv4 TCP listening/established:"
+        ss -H -4 -lntp 2>/dev/null | head -10
+        ss -H -4 -ntp state established 2>/dev/null | head -10
+        echo "IPv4 UDP listening:"
+        ss -H -4 -lnup 2>/dev/null | head -10
+        echo "IPv6 TCP listening/established:"
+        ss -H -6 -lntp 2>/dev/null | head -10
+        ss -H -6 -ntp state established 2>/dev/null | head -10
+        echo "IPv6 UDP listening:"
+        ss -H -6 -lnup 2>/dev/null | head -10
         sleep 3
     done
-
-    trap - INT
 }
 
-# 性能模式监控
 monitor_performance() {
-    echo -e "${BLUE}性能监控模式 (按Ctrl+C退出)${NC}"
-
-    trap 'echo -e "\n${GREEN}监控已停止${NC}"; return' INT
-
+    trap 'echo; return' INT
     while true; do
         clear
-        echo -e "${BLUE}系统性能监控 - $(date)${NC}"
-        echo "======================================================================"
-
-        # CPU使用率
-        if command -v top &> /dev/null; then
-            echo -e "${CYAN}CPU使用率:${NC}"
-            top -bn1 | grep "Cpu(s)" | head -1
-        fi
-
-        # 内存使用情况
-        if [ -f /proc/meminfo ]; then
-            echo -e "${CYAN}内存使用:${NC}"
-            local mem_total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-            local mem_available=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
-            if [ -n "$mem_total" ] && [ -n "$mem_available" ]; then
-                local mem_used=$((mem_total - mem_available))
-                local mem_percent=$((mem_used * 100 / mem_total))
-                echo "总内存: $(format_bytes $((mem_total * 1024)))"
-                echo "已使用: $(format_bytes $((mem_used * 1024))) (${mem_percent}%)"
-                echo "可用: $(format_bytes $((mem_available * 1024)))"
-            fi
-        fi
-
-        # 系统负载
-        if [ -f /proc/loadavg ]; then
-            echo -e "${CYAN}系统负载:${NC}"
-            cat /proc/loadavg
-        fi
-
-        # 网络接口统计
-        echo -e "${CYAN}网络接口流量:${NC}"
-        if [ -f /proc/net/dev ]; then
-            awk 'NR>2 && $2>0 {printf "%-10s RX: %10s TX: %10s\n", $1, $2, $10}' /proc/net/dev | head -5
-        fi
-
-        # iptables规则数量
-        local rule_count=$(iptables -t nat -L PREROUTING -n | grep -c "$RULE_COMMENT" 2>/dev/null || echo "0")
-        echo -e "${CYAN}映射规则数量:${NC} $rule_count"
-
-        echo "======================================================================"
-        echo -e "${CYAN}按 Ctrl+C 退出监控${NC}"
+        check_system_resources
+        echo "IPv4 rules: $(owned_rule_count 4)"
+        echo "IPv6 rules: $(owned_rule_count 6)"
+        echo "TCP rules: $(owned_rule_count all tcp)"
+        echo "UDP rules: $(owned_rule_count all udp)"
         sleep 2
     done
-
-    trap - INT
 }
 
-# --- 新增功能：规则管理 ---
-
-# 交互式规则编辑
 edit_rules() {
     show_current_rules
     echo -e "\n${BLUE}规则编辑选项:${NC}"

@@ -14,12 +14,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck iproute2 iptables
+          sudo apt-get install -y shellcheck iproute2 iptables python3
 
       - name: Bash syntax
         run: |

@@ -153,4 +153,68 @@ export_rules_to_file "$TEST_ROOT/export.conf"
 grep -Fxq '4|udp|6000|7000|3000' "$TEST_ROOT/export.conf" || fail "exported IPv4 record missing"
 grep -Fxq '6|tcp|443|443|8443' "$TEST_ROOT/export.conf" || fail "exported IPv6 record missing"
 
+cat > "$TEST_ROOT/bin/ss" <<'MOCK'
+#!/bin/bash
+args=" $* "
+if [[ "$args" == *" -4 "* && "$args" == *" -t "* ]]; then
+    echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("svc4",pid=1,fd=3))'
+elif [[ "$args" == *" -6 "* && "$args" == *" -u "* ]]; then
+    echo 'UNCONN 0 0 [::]:9090 [::]:* users:(("svc6",pid=2,fd=4))'
+fi
+MOCK
+chmod +x "$TEST_ROOT/bin/ss"
+is_service_listening 4 tcp 8080 || fail "IPv4 TCP listener not detected"
+! is_service_listening 6 tcp 8080 || fail "IPv4 listener leaked into IPv6 TCP check"
+is_service_listening 6 udp 9090 || fail "IPv6 UDP listener not detected"
+! is_service_listening 4 udp 9090 || fail "IPv6 listener leaked into IPv4 UDP check"
+
+# 冲突检查必须同时匹配地址族、协议和完整范围。
+! check_port_conflicts 6500 6600 8080 udp 4 || fail "overlapping owned IPv4 UDP range not detected"
+check_port_conflicts 6500 6600 8080 tcp 4 || fail "UDP range leaked into IPv4 TCP conflict check"
+! check_port_conflicts 9999 9999 8080 tcp 4 || fail "external IPv4 TCP conflict not detected"
+check_port_conflicts 9999 9999 8080 udp 4 || fail "external TCP range leaked into UDP conflict check"
+! check_port_conflicts 443 443 8080 tcp 6 || fail "owned IPv6 TCP conflict not detected"
+check_port_conflicts 443 443 8080 tcp 4 || fail "IPv6 range leaked into IPv4 conflict check"
+
+# 事务型批量导入：只备份一次，第二条失败后必须回滚整个批次。
+BACKUP_CALLS=0
+APPLY_CALLS=0
+ROLLBACK_CALLS=0
+extract_owned_rules() { return 0; }
+backup_rules() {
+    BACKUP_CALLS=$((BACKUP_CALLS + 1))
+    LAST_BACKUP_FILE="$TEST_ROOT/transaction-backup.db"
+    : > "$LAST_BACKUP_FILE"
+}
+apply_rule_record() {
+    APPLY_CALLS=$((APPLY_CALLS + 1))
+    [ "$5" != 9999 ]
+}
+restore_rules_from_backup_file() {
+    [ "$1" = "$LAST_BACKUP_FILE" ] || return 1
+    ROLLBACK_CALLS=$((ROLLBACK_CALLS + 1))
+}
+cat > "$TEST_ROOT/invalid-transaction.conf" <<'EOF'
+4|tcp|8200|8201|8080
+6|udp|not-a-port|9201|9090
+EOF
+if import_rules_from_file "$TEST_ROOT/invalid-transaction.conf"; then
+    fail "invalid transaction unexpectedly succeeded"
+fi
+assert_eq "$BACKUP_CALLS" "0"
+assert_eq "$APPLY_CALLS" "0"
+assert_eq "$ROLLBACK_CALLS" "0"
+
+cat > "$TEST_ROOT/transaction.conf" <<'EOF'
+4|tcp|8100|8101|8080
+6|udp|9100|9101|9999
+EOF
+if import_rules_from_file "$TEST_ROOT/transaction.conf"; then
+    fail "transactional import unexpectedly succeeded"
+fi
+assert_eq "$BACKUP_CALLS" "1"
+assert_eq "$APPLY_CALLS" "2"
+assert_eq "$ROLLBACK_CALLS" "1"
+assert_eq "$IMPORT_SUCCESS_COUNT" "0"
+
 echo "PASS: rule model, dual-stack cache, batch I/O, backup and restore"

@@ -66,6 +66,33 @@ EOF
 import_rules_from_file "$PMM_NETNS_ROOT/import.conf" || fail "dual-stack batch import failed"
 [ "${IMPORT_SUCCESS_COUNT:-0}" -eq 4 ] || fail "expected four imported rules"
 
+python3 - <<'PY' &
+import socket, time
+sockets = []
+for family, kind, address in (
+    (socket.AF_INET, socket.SOCK_DGRAM, ("0.0.0.0", 6102)),
+    (socket.AF_INET, socket.SOCK_STREAM, ("0.0.0.0", 6202)),
+    (socket.AF_INET6, socket.SOCK_DGRAM, ("::", 7102)),
+    (socket.AF_INET6, socket.SOCK_STREAM, ("::", 7202)),
+):
+    sock = socket.socket(family, kind)
+    sock.bind(address)
+    if kind == socket.SOCK_STREAM:
+        sock.listen(1)
+    sockets.append(sock)
+time.sleep(300)
+PY
+listener_pid=$!
+trap 'kill "$listener_pid" >/dev/null 2>&1 || true' EXIT
+sleep 1
+
+is_service_listening 4 udp 6102 || fail "IPv4 UDP listener not detected"
+is_service_listening 4 tcp 6202 || fail "IPv4 TCP listener not detected"
+is_service_listening 6 udp 7102 || fail "IPv6 UDP listener not detected"
+is_service_listening 6 tcp 7202 || fail "IPv6 TCP listener not detected"
+! is_service_listening 6 udp 6102 || fail "IPv4 UDP listener leaked into IPv6 check"
+! is_service_listening 4 tcp 7202 || fail "IPv6 TCP listener leaked into IPv4 check"
+
 iptables -t nat -C PREROUTING -p udp --dport 6100:6101 \
     -m comment --comment "$RULE_COMMENT" -j REDIRECT --to-port 6102
 iptables -t nat -C PREROUTING -p tcp --dport 6200:6201 \
@@ -96,8 +123,16 @@ done
 ! grep -Fq '5555' "$PMM_NETNS_ROOT/export.conf" || fail "external IPv4 rule was exported"
 ! grep -Fq '5557' "$PMM_NETNS_ROOT/export.conf" || fail "external IPv6 rule was exported"
 
+generate_diagnostic_report >/dev/null
+report_file=$(find "$REPORT_DIR" -maxdepth 1 -type f -name 'diagnostic_report_*.txt' | head -n1)
+[ -n "$report_file" ] || fail "diagnostic report was not persisted"
+grep -Fq 'IPv4|udp|6100|6101|6102|listening' "$report_file" || fail "report missing IPv4 UDP state"
+grep -Fq 'IPv4|tcp|6200|6201|6202|listening' "$report_file" || fail "report missing IPv4 TCP state"
+grep -Fq 'IPv6|udp|7100|7101|7102|listening' "$report_file" || fail "report missing IPv6 UDP state"
+grep -Fq 'IPv6|tcp|7200|7201|7202|listening' "$report_file" || fail "report missing IPv6 TCP state"
+
 backup_rules >/dev/null || fail "dual-stack backup failed"
-backup_file=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'owned_rules_*.db' | head -n1)
+backup_file=$LAST_BACKUP_FILE
 [ -n "$backup_file" ] || fail "backup file missing"
 [ "$(grep -cve '^[[:space:]]*$' "$backup_file")" -eq 4 ] || fail "backup did not preserve all four rules"
 
