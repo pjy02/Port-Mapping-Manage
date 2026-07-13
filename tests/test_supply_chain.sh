@@ -32,7 +32,7 @@ verify_local() {
     PMM_RELEASE_REF=v6.0.0 \
     PMM_MANIFEST_SHA256="${PMM_MANIFEST_SHA256:-}" \
     PMM_VERIFY_ONLY=true \
-    "${BASH:-bash}" "$PROJECT_ROOT/install_pmm.sh" "$@"
+    "${BASH:-bash}" "$PROJECT_ROOT/install_pmm.sh"
 }
 
 verify_local >/dev/null
