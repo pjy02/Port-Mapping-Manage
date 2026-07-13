@@ -311,13 +311,20 @@ func (c cli) rule(ctx context.Context, args []string) error {
 		if c.json {
 			return writeJSON(c.stdout, state)
 		}
-		fmt.Fprintf(c.stdout, "%-18s %-5s %-5s %-13s %-8s %-8s\n", "ID", "IP", "协议", "来源端口", "目标", "状态")
+		renderRuleTableHeader(c.stdout)
 		for _, rule := range state.Database.Rules {
 			status := "启用"
 			if !rule.Enabled {
 				status = "禁用"
 			}
-			fmt.Fprintf(c.stdout, "%-18s IPv%-3d %-5s %-13s %-8d %-8s\n", rule.ID, rule.IPVersion, rule.Protocol, fmt.Sprintf("%d-%d", rule.StartPort, rule.EndPort), rule.TargetPort, status)
+			renderRuleTableRow(c.stdout,
+				rule.ID,
+				fmt.Sprintf("IPv%d", rule.IPVersion),
+				string(rule.Protocol),
+				fmt.Sprintf("%d-%d", rule.StartPort, rule.EndPort),
+				strconv.Itoa(int(rule.TargetPort)),
+				status,
+			)
 		}
 		if state.Drift {
 			fmt.Fprintln(c.stdout, "警告：数据库与内核状态不一致")
@@ -400,6 +407,25 @@ func (c cli) rule(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("未知规则命令 %q", args[0])
 	}
+}
+
+var ruleTableWidths = [...]int{20, 8, 8, 16, 10, 8}
+
+func renderRuleTableHeader(w io.Writer) {
+	renderRuleTableRow(w, "ID", "IP", "协议", "来源端口", "目标", "状态")
+}
+
+func renderRuleTableRow(w io.Writer, values ...string) {
+	for index, value := range values {
+		if index >= len(ruleTableWidths) {
+			break
+		}
+		fmt.Fprint(w, padDisplay(value, ruleTableWidths[index]))
+		if index < len(ruleTableWidths)-1 {
+			fmt.Fprint(w, "  ")
+		}
+	}
+	fmt.Fprintln(w)
 }
 
 func (c cli) importRules(ctx context.Context, args []string) error {

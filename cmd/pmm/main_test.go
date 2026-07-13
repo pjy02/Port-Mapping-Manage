@@ -61,3 +61,36 @@ func TestCommandFlagHelpUsesChineseDefaults(t *testing.T) {
 		t.Fatalf("参数帮助未完全中文化：%q", text)
 	}
 }
+
+func TestRuleTableChineseHeaderAlignment(t *testing.T) {
+	var output bytes.Buffer
+	renderRuleTableHeader(&output)
+	renderRuleTableRow(&output, "85b2f9822f0a89cc", "IPv4", "udp", "6000-7000", "3000", "启用")
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("规则表行数异常：%q", output.String())
+	}
+	columns := [][2]string{
+		{"ID", "85b2f9822f0a89cc"},
+		{"IP", "IPv4"},
+		{"协议", "udp"},
+		{"来源端口", "6000-7000"},
+		{"目标", "3000"},
+		{"状态", "启用"},
+	}
+	for _, column := range columns {
+		headerStart := displayStart(lines[0], column[0])
+		valueStart := displayStart(lines[1], column[1])
+		if headerStart < 0 || valueStart < 0 || headerStart != valueStart {
+			t.Fatalf("列 %q 未对齐：表头=%d，数据=%d\n%s", column[0], headerStart, valueStart, output.String())
+		}
+	}
+}
+
+func displayStart(line, value string) int {
+	index := strings.Index(line, value)
+	if index < 0 {
+		return -1
+	}
+	return displayWidth(line[:index])
+}
