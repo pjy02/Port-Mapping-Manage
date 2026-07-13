@@ -1,60 +1,65 @@
-#!/bin/bash
-# Port Mapping Manager verified installer
+#!/usr/bin/env bash
+# Port Mapping Manager v6 verified binary installer.
 
 set -euo pipefail
 
-RELEASE_REF="${PMM_RELEASE_REF:-v5.0.0}"
-EXPECTED_MANIFEST_SHA256="${PMM_MANIFEST_SHA256:-5be41ad589aadb17c2119e972c71e2fcbf9e795ccc9b11629c924908936a7073}"
-REMOTE_BASE="https://raw.githubusercontent.com/pjy02/Port-Mapping-Manage/$RELEASE_REF"
+RELEASE_REF="${PMM_RELEASE_REF:-v6.0.0}"
+EXPECTED_MANIFEST_SHA256="${PMM_MANIFEST_SHA256:-}"
 LOCAL_SOURCE_DIR="${PMM_LOCAL_SOURCE_DIR:-}"
 VERIFY_ONLY="${PMM_VERIFY_ONLY:-false}"
-INSTALL_DIR="/usr/local/bin"
-SCRIPT_DIR="/etc/port_mapping_manager"
+INSTALL_DEPENDENCIES="${PMM_INSTALL_DEPENDENCIES:-true}"
+INSTALL_DIR="${PMM_INSTALL_DIR:-/usr/local/bin}"
+CONFIG_DIR="${PMM_CONFIG_DIR:-/etc/port-mapping-manager}"
+REMOTE_BASE="${PMM_REMOTE_BASE:-https://github.com/pjy02/Port-Mapping-Manage/releases/download}"
 TMP_DIR=$(mktemp -d)
-FILES=(port_mapping_manager.sh pmm)
+SUDO=()
 PACKAGE_MANAGER=""
-SUDO=""
 
 cleanup() {
-    rm -rf "$TMP_DIR"
+    rm -rf -- "$TMP_DIR"
 }
 trap cleanup EXIT INT TERM
 
-info()  { echo -e "\033[0;32m[INFO] $*\033[0m"; }
-warn()  { echo -e "\033[1;33m[WARN] $*\033[0m"; }
-error() { echo -e "\033[0;31m[ERROR] $*\033[0m" >&2; }
+info() { printf '\033[0;32m[INFO]\033[0m %s\n' "$*"; }
+error() { printf '\033[0;31m[ERROR]\033[0m %s\n' "$*" >&2; }
 
-detect_system() {
+detect_architecture() {
+    case "$(uname -m)" in
+        x86_64|amd64) printf '%s\n' amd64 ;;
+        aarch64|arm64) printf '%s\n' arm64 ;;
+        *) error "unsupported architecture: $(uname -m)"; return 1 ;;
+    esac
+}
+
+detect_privilege_and_package_manager() {
     if [ "$(id -u)" -ne 0 ]; then
-        if command -v sudo >/dev/null 2>&1; then
-            SUDO="sudo"
-        elif [ "$VERIFY_ONLY" != true ]; then
-            error "需要 root 权限或 sudo"
+        command -v sudo >/dev/null 2>&1 || {
+            error "installation requires root or sudo"
             return 1
-        fi
+        }
+        SUDO=(sudo)
     fi
-
     if command -v apt-get >/dev/null 2>&1; then
-        PACKAGE_MANAGER="apt"
+        PACKAGE_MANAGER=apt
     elif command -v dnf >/dev/null 2>&1; then
-        PACKAGE_MANAGER="dnf"
+        PACKAGE_MANAGER=dnf
     elif command -v yum >/dev/null 2>&1; then
-        PACKAGE_MANAGER="yum"
+        PACKAGE_MANAGER=yum
     elif command -v pacman >/dev/null 2>&1; then
-        PACKAGE_MANAGER="pacman"
-    else
-        PACKAGE_MANAGER="unknown"
+        PACKAGE_MANAGER=pacman
     fi
 }
 
 install_packages() {
-    local packages=("$@")
-    [ ${#packages[@]} -gt 0 ] || return 0
+    [ "$INSTALL_DEPENDENCIES" = true ] || return 0
     case "$PACKAGE_MANAGER" in
-        apt) $SUDO apt-get update -qq && $SUDO apt-get install -y -qq "${packages[@]}" ;;
-        dnf|yum) $SUDO "$PACKAGE_MANAGER" install -y -q "${packages[@]}" ;;
-        pacman) $SUDO pacman -Sy --noconfirm --needed "${packages[@]}" ;;
-        *) error "无法自动安装依赖: ${packages[*]}"; return 1 ;;
+        apt)
+            "${SUDO[@]}" apt-get update -qq
+            "${SUDO[@]}" apt-get install -y -qq "$@"
+            ;;
+        dnf|yum) "${SUDO[@]}" "$PACKAGE_MANAGER" install -y -q "$@" ;;
+        pacman) "${SUDO[@]}" pacman -Sy --noconfirm --needed "$@" ;;
+        *) error "cannot install missing dependencies: $*"; return 1 ;;
     esac
 }
 
@@ -62,9 +67,16 @@ ensure_verification_tools() {
     local missing=()
     command -v curl >/dev/null 2>&1 || missing+=(curl)
     command -v sha256sum >/dev/null 2>&1 || missing+=(coreutils)
-    [ ${#missing[@]} -eq 0 ] || install_packages "${missing[@]}"
-    command -v curl >/dev/null 2>&1 || { error "缺少 curl"; return 1; }
-    command -v sha256sum >/dev/null 2>&1 || { error "缺少 sha256sum"; return 1; }
+    if [ ${#missing[@]} -gt 0 ]; then
+        [ "$VERIFY_ONLY" = false ] || {
+            error "verification tools are missing: ${missing[*]}"
+            return 1
+        }
+        detect_privilege_and_package_manager
+        install_packages "${missing[@]}"
+    fi
+    command -v curl >/dev/null 2>&1 || { error "curl is required"; return 1; }
+    command -v sha256sum >/dev/null 2>&1 || { error "sha256sum is required"; return 1; }
 }
 
 fetch_file() {
@@ -73,7 +85,8 @@ fetch_file() {
         cp -- "$LOCAL_SOURCE_DIR/$name" "$destination"
     else
         curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-            --connect-timeout 10 --max-time 60 "$REMOTE_BASE/$name" -o "$destination"
+            --connect-timeout 10 --max-time 120 \
+            "$REMOTE_BASE/$RELEASE_REF/$name" -o "$destination"
     fi
 }
 
@@ -83,67 +96,123 @@ manifest_hash_for() {
 }
 
 verify_release() {
+    local binary_name=$1
     local manifest="$TMP_DIR/release-manifest.sha256"
-    local actual_manifest_sha256 expected actual count file
+    local actual_manifest expected_binary actual_binary count
 
-    [[ "$RELEASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { error "无效发布引用"; return 1; }
+    [[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]] || {
+        error "release reference must be an immutable semantic-version tag"
+        return 1
+    }
     [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || {
-        error "缺少有效的受信任清单 SHA-256；安装已拒绝"
+        error "PMM_MANIFEST_SHA256 must contain an independently verified 64-character digest"
         return 1
     }
 
     fetch_file release-manifest.sha256 "$manifest"
-    actual_manifest_sha256=$(sha256sum "$manifest" | awk '{print tolower($1)}')
-    if [ "$actual_manifest_sha256" != "${EXPECTED_MANIFEST_SHA256,,}" ]; then
-        error "发布清单 SHA-256 与安装器信任锚不匹配"
+    actual_manifest=$(sha256sum "$manifest" | awk '{print tolower($1)}')
+    [ "$actual_manifest" = "${EXPECTED_MANIFEST_SHA256,,}" ] || {
+        error "release manifest does not match the trusted SHA-256"
         return 1
-    fi
+    }
 
-    for file in "${FILES[@]}"; do
-        count=$(awk -v name="$file" '$2 == name {count++} END {print count+0}' "$manifest")
-        [ "$count" -eq 1 ] || { error "清单中的 $file 条目数量异常"; return 1; }
-        expected=$(manifest_hash_for "$file" "$manifest")
-        [ -n "$expected" ] || { error "清单缺少 $file"; return 1; }
-        fetch_file "$file" "$TMP_DIR/$file"
-        actual=$(sha256sum "$TMP_DIR/$file" | awk '{print tolower($1)}')
-        if [ "$actual" != "$expected" ]; then
-            error "$file SHA-256 校验失败"
+    count=$(awk -v name="$binary_name" '$2 == name {count++} END {print count+0}' "$manifest")
+    [ "$count" -eq 1 ] || {
+        error "verified manifest must contain exactly one $binary_name entry"
+        return 1
+    }
+    expected_binary=$(manifest_hash_for "$binary_name" "$manifest")
+    [ -n "$expected_binary" ] || { error "manifest entry for $binary_name is invalid"; return 1; }
+    fetch_file "$binary_name" "$TMP_DIR/$binary_name"
+    actual_binary=$(sha256sum "$TMP_DIR/$binary_name" | awk '{print tolower($1)}')
+    [ "$actual_binary" = "$expected_binary" ] || {
+        error "$binary_name does not match the verified manifest"
+        return 1
+    }
+    chmod 0755 "$TMP_DIR/$binary_name"
+    "$TMP_DIR/$binary_name" version >/dev/null || {
+        error "verified payload cannot execute on this host"
+        return 1
+    }
+    info "release reference, manifest and binary verification passed"
+}
+
+ensure_runtime_dependencies() {
+    local missing=()
+    command -v iptables >/dev/null 2>&1 || missing+=(iptables)
+    command -v ip6tables >/dev/null 2>&1 || missing+=(iptables)
+    if [ ${#missing[@]} -gt 0 ]; then
+        install_packages "${missing[@]}"
+    fi
+    command -v iptables >/dev/null 2>&1 || { error "iptables is required"; return 1; }
+    command -v ip6tables >/dev/null 2>&1 || { error "ip6tables is required"; return 1; }
+}
+
+install_verified_binary() {
+    local binary_name=$1 target="$INSTALL_DIR/pmm"
+    local candidate rollback trust_candidate previous_trust
+    candidate="$INSTALL_DIR/.pmm-candidate-$$"
+    rollback="$INSTALL_DIR/.pmm-rollback-$$"
+    trust_candidate="$CONFIG_DIR/.trusted-release-$$.json"
+    previous_trust="$CONFIG_DIR/.trusted-release-rollback-$$.json"
+
+    for directory in "$INSTALL_DIR" "$CONFIG_DIR"; do
+        if "${SUDO[@]}" test -L "$directory"; then
+            error "refusing to use symlink directory: $directory"
+            return 1
+        fi
+        if "${SUDO[@]}" test -e "$directory" && ! "${SUDO[@]}" test -d "$directory"; then
+            error "refusing to use non-directory path: $directory"
             return 1
         fi
     done
+    "${SUDO[@]}" install -d -m 0755 "$INSTALL_DIR" "$CONFIG_DIR"
+    if "${SUDO[@]}" test -e "$candidate" || "${SUDO[@]}" test -e "$rollback" || \
+       "${SUDO[@]}" test -e "$trust_candidate" || "${SUDO[@]}" test -e "$previous_trust"; then
+        error "installer staging path already exists"
+        return 1
+    fi
+    if "${SUDO[@]}" test -e "$target" && ! "${SUDO[@]}" test -f "$target"; then
+        error "refusing to replace a non-regular pmm path"
+        return 1
+    fi
+    "${SUDO[@]}" install -m 0755 "$TMP_DIR/$binary_name" "$candidate"
+    printf '{\n  "release_ref": "%s",\n  "manifest_sha256": "%s"\n}\n' \
+        "$RELEASE_REF" "${EXPECTED_MANIFEST_SHA256,,}" > "$TMP_DIR/trusted-release.json"
+    "${SUDO[@]}" install -m 0600 "$TMP_DIR/trusted-release.json" "$trust_candidate"
 
-    bash -n "$TMP_DIR/port_mapping_manager.sh" || { error "主脚本语法检查失败"; return 1; }
-    bash -n "$TMP_DIR/pmm" || { error "启动器语法检查失败"; return 1; }
-    info "发布引用、清单和全部负载校验通过"
-}
-
-install_runtime_dependencies() {
-    local missing_packages=()
-    command -v iptables >/dev/null 2>&1 || missing_packages+=(iptables)
-    command -v ip6tables >/dev/null 2>&1 || missing_packages+=(iptables)
-    install_packages "${missing_packages[@]}"
-}
-
-install_verified_release() {
-    local trust_file="$TMP_DIR/trusted-release.conf"
-    printf 'RELEASE_REF=%s\nMANIFEST_SHA256=%s\n' \
-        "$RELEASE_REF" "${EXPECTED_MANIFEST_SHA256,,}" > "$trust_file"
-
-    $SUDO install -d -m 0755 "$SCRIPT_DIR" "$INSTALL_DIR"
-    $SUDO install -m 0755 "$TMP_DIR/port_mapping_manager.sh" "$SCRIPT_DIR/port_mapping_manager.sh"
-    $SUDO install -m 0755 "$TMP_DIR/pmm" "$INSTALL_DIR/pmm"
-    $SUDO install -m 0644 "$TMP_DIR/release-manifest.sha256" "$SCRIPT_DIR/release-manifest.sha256"
-    $SUDO install -m 0644 "$trust_file" "$SCRIPT_DIR/trusted-release.conf"
-    info "已安装经过校验的 Port Mapping Manager $RELEASE_REF"
+    if "${SUDO[@]}" test -e "$CONFIG_DIR/trusted-release.json"; then
+        "${SUDO[@]}" mv -- "$CONFIG_DIR/trusted-release.json" "$previous_trust"
+    fi
+    if "${SUDO[@]}" test -e "$target"; then
+        "${SUDO[@]}" mv -- "$target" "$rollback"
+    fi
+    if ! "${SUDO[@]}" mv -- "$candidate" "$target"; then
+        "${SUDO[@]}" test ! -e "$rollback" || "${SUDO[@]}" mv -- "$rollback" "$target"
+        "${SUDO[@]}" test ! -e "$previous_trust" || "${SUDO[@]}" mv -- "$previous_trust" "$CONFIG_DIR/trusted-release.json"
+        return 1
+    fi
+    if ! "${SUDO[@]}" mv -- "$trust_candidate" "$CONFIG_DIR/trusted-release.json"; then
+        "${SUDO[@]}" rm -f -- "$target"
+        "${SUDO[@]}" test ! -e "$rollback" || "${SUDO[@]}" mv -- "$rollback" "$target"
+        "${SUDO[@]}" test ! -e "$previous_trust" || "${SUDO[@]}" mv -- "$previous_trust" "$CONFIG_DIR/trusted-release.json"
+        return 1
+    fi
+    "${SUDO[@]}" rm -f -- "$rollback" "$previous_trust"
+    info "installed Port Mapping Manager $RELEASE_REF"
+    info "no firewall or startup configuration was changed; run 'pmm migrate' or 'pmm persistence enable' explicitly"
 }
 
 main() {
-    detect_system
+    local architecture binary_name
+    architecture=$(detect_architecture)
+    binary_name="pmm-linux-$architecture"
     ensure_verification_tools
-    verify_release
+    verify_release "$binary_name"
     [ "$VERIFY_ONLY" = true ] && return 0
-    install_runtime_dependencies
-    install_verified_release
+    detect_privilege_and_package_manager
+    ensure_runtime_dependencies
+    install_verified_binary "$binary_name"
 }
 
 main "$@"

@@ -1,0 +1,6 @@
+/.gocache/
+/.gopath/
+/dist/
+/pmm.exe
+/pmm-v6
+*.test

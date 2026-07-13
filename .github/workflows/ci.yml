@@ -8,40 +8,46 @@ permissions:
   contents: read
 
 jobs:
-  shell-and-network-tests:
+  go-and-shell:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Install test dependencies
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache: false
+
+      - name: Install integration dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck iproute2 iptables python3
 
-      - name: Bash syntax
+      - name: Format, unit tests and static analysis
         run: |
-          bash -n port_mapping_manager.sh
-          bash -n install_pmm.sh
-          bash -n pmm
-          bash -n tests/test_rule_model.sh
-          bash -n tests/test_netns_integration.sh
-          bash -n tests/test_supply_chain.sh
+          test -z "$(gofmt -l cmd internal)"
+          go test -race ./...
+          go vet ./...
 
-      - name: ShellCheck
+      - name: Pinned-toolchain Linux builds
         run: |
-          shellcheck --severity=error --external-sources \
-            port_mapping_manager.sh install_pmm.sh pmm \
-            tests/test_rule_model.sh tests/test_netns_integration.sh \
-            tests/test_supply_chain.sh
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=true -o dist/pmm-linux-amd64 ./cmd/pmm
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=true -o dist/pmm-linux-arm64 ./cmd/pmm
+          (cd dist && sha256sum pmm-linux-amd64 pmm-linux-arm64 > release-manifest.sha256)
 
-      - name: Rule model tests
-        run: bash tests/test_rule_model.sh
+      - name: Bash syntax and ShellCheck
+        run: |
+          bash -n install_pmm.sh tests/test_supply_chain.sh tests/test_netns_integration.sh
+          shellcheck --severity=warning install_pmm.sh tests/test_supply_chain.sh tests/test_netns_integration.sh
 
-      - name: Supply-chain verification tests
+      - name: Supply-chain verification
         run: bash tests/test_supply_chain.sh
 
       - name: Network namespace integration
-        run: sudo bash tests/test_netns_integration.sh
+        run: sudo --preserve-env=PATH bash tests/test_netns_integration.sh

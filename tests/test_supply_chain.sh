@@ -1,38 +1,53 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TEST_ROOT=$(mktemp -d)
-trap 'rm -rf "$TEST_ROOT"' EXIT
-export PATH="/usr/bin:$PATH"
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
 
-manifest_sha256=$(sha256sum "$PROJECT_ROOT/release-manifest.sha256" | awk '{print $1}')
-(cd "$PROJECT_ROOT" && sha256sum -c install_pmm.sh.sha256 >/dev/null)
+architecture=amd64
+case "$(uname -m)" in
+    aarch64|arm64) architecture=arm64 ;;
+esac
+binary_name="pmm-linux-$architecture"
 
-PMM_LOCAL_SOURCE_DIR="$PROJECT_ROOT" \
+(
+    cd "$PROJECT_ROOT"
+    CGO_ENABLED=0 go build -trimpath -o "$TEST_ROOT/$binary_name" ./cmd/pmm
+)
+(
+    cd "$TEST_ROOT"
+    sha256sum "$binary_name" > release-manifest.sha256
+)
+manifest_sha256=$(sha256sum "$TEST_ROOT/release-manifest.sha256" | awk '{print $1}')
+
+PMM_LOCAL_SOURCE_DIR="$TEST_ROOT" \
+PMM_RELEASE_REF=v6.0.0 \
 PMM_MANIFEST_SHA256="$manifest_sha256" \
 PMM_VERIFY_ONLY=true \
 bash "$PROJECT_ROOT/install_pmm.sh" >/dev/null
 
-cp "$PROJECT_ROOT/release-manifest.sha256" "$TEST_ROOT/release-manifest.sha256"
-cp "$PROJECT_ROOT/port_mapping_manager.sh" "$TEST_ROOT/port_mapping_manager.sh"
-cp "$PROJECT_ROOT/pmm" "$TEST_ROOT/pmm"
-printf '\n# tampered payload\n' >> "$TEST_ROOT/port_mapping_manager.sh"
-
+printf '\ntampered\n' >> "$TEST_ROOT/$binary_name"
 if PMM_LOCAL_SOURCE_DIR="$TEST_ROOT" \
+   PMM_RELEASE_REF=v6.0.0 \
    PMM_MANIFEST_SHA256="$manifest_sha256" \
    PMM_VERIFY_ONLY=true \
    bash "$PROJECT_ROOT/install_pmm.sh" >/dev/null 2>&1; then
-    echo "FAIL: tampered payload was accepted" >&2
+    printf '%s\n' "FAIL: tampered binary was accepted" >&2
     exit 1
 fi
 
-if PMM_LOCAL_SOURCE_DIR="$PROJECT_ROOT" \
-   PMM_MANIFEST_SHA256="${manifest_sha256%?}0" \
+wrong_manifest=$(printf '%064d' 0)
+if [ "$wrong_manifest" = "$manifest_sha256" ]; then
+    wrong_manifest=$(printf '%064d' 1)
+fi
+if PMM_LOCAL_SOURCE_DIR="$TEST_ROOT" \
+   PMM_RELEASE_REF=v6.0.0 \
+   PMM_MANIFEST_SHA256="$wrong_manifest" \
    PMM_VERIFY_ONLY=true \
    bash "$PROJECT_ROOT/install_pmm.sh" >/dev/null 2>&1; then
-    echo "FAIL: untrusted manifest digest was accepted" >&2
+    printf '%s\n' "FAIL: untrusted manifest was accepted" >&2
     exit 1
 fi
 
-echo "PASS: supply-chain verification fails closed"
+printf '%s\n' "PASS: v6 supply-chain verification fails closed"

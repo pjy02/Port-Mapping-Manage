@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache: false
+
+      - name: Test and build release assets
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]
+          go test ./...
+          go vet ./...
+          bash -n install_pmm.sh
+          mkdir -p dist
+          commit_date=$(git show -s --format=%cI HEAD)
+          ldflags="-s -w -X github.com/pjy02/Port-Mapping-Manage/v6/internal/version.Version=${VERSION#v} -X github.com/pjy02/Port-Mapping-Manage/v6/internal/version.Commit=${GITHUB_SHA} -X github.com/pjy02/Port-Mapping-Manage/v6/internal/version.Date=${commit_date}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=true -ldflags "$ldflags" -o dist/pmm-linux-amd64 ./cmd/pmm
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=true -ldflags "$ldflags" -o dist/pmm-linux-arm64 ./cmd/pmm
+          cp install_pmm.sh dist/install_pmm.sh
+          (cd dist && sha256sum pmm-linux-amd64 pmm-linux-arm64 > release-manifest.sha256)
+          (cd dist && sha256sum release-manifest.sha256 > release-manifest.sha256.sha256)
+          (cd dist && sha256sum install_pmm.sh > install_pmm.sh.sha256)
+
+      - name: Create immutable-tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/pmm-linux-amd64 \
+            dist/pmm-linux-arm64 \
+            dist/release-manifest.sha256 \
+            dist/release-manifest.sha256.sha256 \
+            dist/install_pmm.sh \
+            dist/install_pmm.sh.sha256 \
+            --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
