@@ -1,15 +1,15 @@
-name: Release
-run-name: Release ${{ inputs.version || github.ref_name }}
+name: 发布版本
+run-name: 发布 ${{ inputs.version || github.ref_name }}
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (vX.Y.Z)"
+        description: "发布版本（vX.Y.Z）"
         required: true
         type: string
       prerelease:
-        description: "Publish as a pre-release"
+        description: "发布为预发行版本"
         required: false
         default: false
         type: boolean
@@ -26,6 +26,7 @@ concurrency:
 
 jobs:
   build-release:
+    name: 构建并发布
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -34,33 +35,39 @@ jobs:
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
 
     steps:
-      - name: Checkout release source
+      - name: 检出发布源码
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
 
-      - name: Validate release request
+      - name: 校验发布请求
         run: |
-          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]] || {
+            echo "版本号格式无效：$VERSION；必须使用 vX.Y.Z 格式，例如 v6.0.2" >&2
+            exit 1
+          }
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             [ "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH" ] || {
-              echo "Manual releases must run from the default branch: $DEFAULT_BRANCH" >&2
+              echo "手动发布必须从默认分支运行：$DEFAULT_BRANCH" >&2
               exit 1
             }
           fi
 
-      - name: Set up Go
+      - name: 配置 Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
           check-latest: false
           cache: false
 
-      - name: Test and build release assets
+      - name: 测试并构建发布文件
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.PMM_RELEASE_SIGNING_KEY }}
         run: |
-          test -n "$RELEASE_SIGNING_KEY"
+          test -n "$RELEASE_SIGNING_KEY" || {
+            echo "未配置仓库 Secret：PMM_RELEASE_SIGNING_KEY" >&2
+            exit 1
+          }
           go test ./...
           go vet ./...
           bash -n install_pmm.sh
@@ -75,7 +82,10 @@ jobs:
           chmod 0600 "$RUNNER_TEMP/pmm-release-signing.pem"
           openssl pkey -in "$RUNNER_TEMP/pmm-release-signing.pem" -pubout -out "$RUNNER_TEMP/derived-public.pem"
           cmp <(openssl pkey -pubin -in release-signing-public.pem -outform DER) \
-              <(openssl pkey -pubin -in "$RUNNER_TEMP/derived-public.pem" -outform DER)
+              <(openssl pkey -pubin -in "$RUNNER_TEMP/derived-public.pem" -outform DER) || {
+            echo "PMM_RELEASE_SIGNING_KEY 与仓库中的发布公钥不匹配" >&2
+            exit 1
+          }
           (cd dist && sha256sum pmm-linux-amd64 pmm-linux-arm64 install_pmm.sh > release-manifest.sha256)
           openssl dgst -sha256 -sign "$RUNNER_TEMP/pmm-release-signing.pem" \
             -out dist/release-manifest.sha256.sig dist/release-manifest.sha256
@@ -84,16 +94,16 @@ jobs:
           (cd dist && sha256sum install_pmm.sh > install_pmm.sh.sha256)
           rm -f "$RUNNER_TEMP/pmm-release-signing.pem" "$RUNNER_TEMP/derived-public.pem"
 
-      - name: Create immutable tag for manual release
+      - name: 为手动发布创建不可变标签
         if: github.event_name == 'workflow_dispatch'
         run: |
           if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
             git fetch --force origin "refs/tags/$VERSION:refs/tags/$VERSION"
             [ "$(git rev-list -n 1 "$VERSION")" = "$GITHUB_SHA" ] || {
-              echo "Tag $VERSION already points to a different commit" >&2
+              echo "标签 $VERSION 已指向另一个提交，拒绝覆盖" >&2
               exit 1
             }
-            echo "Reusing $VERSION from an earlier run for the same commit"
+            echo "标签 $VERSION 已指向当前提交，将继续使用"
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -101,7 +111,7 @@ jobs:
             git push origin "refs/tags/$VERSION"
           fi
 
-      - name: Create immutable-tag release
+      - name: 创建不可变标签的 GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

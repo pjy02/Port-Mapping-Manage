@@ -22,7 +22,7 @@ func tryAcquire(path string) (Handle, bool, error) {
 		if err == syscall.EWOULDBLOCK {
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("flock %s: %w", path, err)
+		return nil, false, fmt.Errorf("锁定文件 %s 失败：%w", path, err)
 	}
 	if err := file.Truncate(0); err == nil {
 		_, _ = fmt.Fprintf(file, "%d\n", os.Getpid())

@@ -75,7 +75,7 @@ func (m Manager) Check(ctx context.Context, current string) (Latest, error) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return Latest{}, fmt.Errorf("release API returned HTTP %d", response.StatusCode)
+		return Latest{}, fmt.Errorf("发布接口返回 HTTP 状态码 %d", response.StatusCode)
 	}
 	var payload struct {
 		TagName string `json:"tag_name"`
@@ -86,14 +86,14 @@ func (m Manager) Check(ctx context.Context, current string) (Latest, error) {
 		return Latest{}, err
 	}
 	if !releaseRefPattern.MatchString(payload.TagName) {
-		return Latest{}, errors.New("release API returned an invalid tag")
+		return Latest{}, errors.New("发布接口返回了无效的版本标签")
 	}
 	return Latest{Current: current, Latest: payload.TagName, Available: payload.TagName != "v"+strings.TrimPrefix(current, "v"), URL: payload.HTMLURL}, nil
 }
 
 func (m Manager) Install(ctx context.Context, releaseRef, manifestDigest string) error {
 	if runtime.GOOS != "linux" {
-		return errors.New("self-update is supported only on Linux")
+		return errors.New("自动更新仅支持 Linux")
 	}
 	if releaseRef == "" || releaseRef == "latest" {
 		latest, err := m.Check(ctx, "")
@@ -103,20 +103,20 @@ func (m Manager) Install(ctx context.Context, releaseRef, manifestDigest string)
 		releaseRef = latest.Latest
 	}
 	if !releaseRefPattern.MatchString(releaseRef) {
-		return errors.New("release ref must be an immutable semantic-version tag")
+		return errors.New("发布版本必须是不可变的语义化版本标签")
 	}
 	manifestDigest = strings.ToLower(manifestDigest)
 	if manifestDigest != "" {
 		if len(manifestDigest) != 64 {
-			return errors.New("manifest SHA-256 pin must contain 64 characters")
+			return errors.New("固定的清单 SHA-256 必须包含 64 个十六进制字符")
 		}
 		if _, err := hex.DecodeString(manifestDigest); err != nil {
-			return errors.New("manifest SHA-256 pin is invalid")
+			return errors.New("固定的清单 SHA-256 无效")
 		}
 	}
 	arch := runtime.GOARCH
 	if arch != "amd64" && arch != "arm64" {
-		return fmt.Errorf("unsupported architecture %s", arch)
+		return fmt.Errorf("不支持的处理器架构 %s", arch)
 	}
 	filename := "pmm-linux-" + arch
 	base := strings.TrimSuffix(m.BaseURL, "/")
@@ -140,7 +140,7 @@ func (m Manager) Install(ctx context.Context, releaseRef, manifestDigest string)
 	}
 	manifestActual := digest(manifest)
 	if manifestDigest != "" && manifestActual != manifestDigest {
-		return errors.New("release manifest does not match the additionally pinned SHA-256")
+		return errors.New("发布清单与额外固定的 SHA-256 不匹配")
 	}
 	expected, err := manifestEntry(manifest, filename)
 	if err != nil {
@@ -151,7 +151,7 @@ func (m Manager) Install(ctx context.Context, releaseRef, manifestDigest string)
 		return err
 	}
 	if digest(binary) != expected {
-		return errors.New("downloaded binary SHA-256 does not match the verified manifest")
+		return errors.New("下载程序的 SHA-256 与已验证清单不匹配")
 	}
 	return m.installVerified(binary, Trust{ReleaseRef: releaseRef, ManifestSHA256: manifestActual, PublicKeySHA256: publicKeyDigest, InstalledAt: m.now().UTC()})
 }
@@ -163,15 +163,15 @@ func (m Manager) releasePublicKey() (*rsa.PublicKey, string, error) {
 	}
 	block, rest := pem.Decode(keyPEM)
 	if block == nil || len(strings.TrimSpace(string(rest))) != 0 || block.Type != "PUBLIC KEY" {
-		return nil, "", errors.New("release public key is invalid")
+		return nil, "", errors.New("发布公钥无效")
 	}
 	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		return nil, "", fmt.Errorf("parse release public key: %w", err)
+		return nil, "", fmt.Errorf("解析发布公钥失败：%w", err)
 	}
 	key, ok := parsed.(*rsa.PublicKey)
 	if !ok || key.N.BitLen() < 3072 {
-		return nil, "", errors.New("release public key must be RSA 3072 bits or stronger")
+		return nil, "", errors.New("发布公钥必须是至少 3072 位的 RSA 密钥")
 	}
 	return key, digest(block.Bytes), nil
 }
@@ -179,14 +179,14 @@ func (m Manager) releasePublicKey() (*rsa.PublicKey, string, error) {
 func verifyManifestSignature(key *rsa.PublicKey, manifest, signature []byte) error {
 	sum := sha256.Sum256(manifest)
 	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, sum[:], signature); err != nil {
-		return errors.New("release manifest signature is invalid")
+		return errors.New("发布清单签名无效")
 	}
 	return nil
 }
 
 func (m Manager) installVerified(binary []byte, trust Trust) error {
 	if m.BinaryPath == "" || m.TrustPath == "" {
-		return errors.New("binary and trust paths are required")
+		return errors.New("程序路径和信任记录路径不能为空")
 	}
 	for _, directory := range []string{filepath.Dir(m.BinaryPath), filepath.Dir(m.TrustPath)} {
 		if err := verifySafeDirectory(directory); err != nil {
@@ -195,7 +195,7 @@ func (m Manager) installVerified(binary []byte, trust Trust) error {
 	}
 	if info, err := os.Lstat(m.BinaryPath); err == nil {
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("refusing to replace a non-regular or symlink binary")
+			return errors.New("目标程序不是普通文件或是符号链接，拒绝替换")
 		}
 	} else if !os.IsNotExist(err) {
 		return err
@@ -205,16 +205,16 @@ func (m Manager) installVerified(binary []byte, trust Trust) error {
 	defer os.Remove(candidate)
 	defer os.Remove(rollback)
 	if _, err := os.Lstat(candidate); !os.IsNotExist(err) {
-		return errors.New("candidate update path already exists")
+		return errors.New("更新候选路径已存在，拒绝覆盖")
 	}
 	if _, err := os.Lstat(rollback); !os.IsNotExist(err) {
-		return errors.New("rollback update path already exists")
+		return errors.New("更新回滚路径已存在，拒绝覆盖")
 	}
 	if err := storage.WriteFileAtomic(candidate, binary, 0o755); err != nil {
 		return err
 	}
 	if err := m.validateBinary(candidate); err != nil {
-		return fmt.Errorf("verified update payload cannot execute: %w", err)
+		return fmt.Errorf("验证通过的更新程序无法执行：%w", err)
 	}
 	hadPrevious := false
 	if _, err := os.Stat(m.BinaryPath); err == nil {
@@ -234,7 +234,7 @@ func (m Manager) installVerified(binary []byte, trust Trust) error {
 		if hadPrevious {
 			_ = os.Rename(rollback, m.BinaryPath)
 		}
-		return fmt.Errorf("save trust anchor and rolled back binary: %w", err)
+		return fmt.Errorf("保存发布信任记录失败，程序已回滚：%w", err)
 	}
 	return nil
 }
@@ -258,7 +258,7 @@ func verifySafeDirectory(path string) error {
 		return err
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing unsafe update directory %s", path)
+		return fmt.Errorf("更新目录不安全或是符号链接，拒绝使用：%s", path)
 	}
 	return nil
 }
@@ -275,10 +275,10 @@ func (m Manager) download(ctx context.Context, url string, maximum int64) ([]byt
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download returned HTTP %d", response.StatusCode)
+		return nil, fmt.Errorf("下载请求返回 HTTP 状态码 %d", response.StatusCode)
 	}
 	if response.ContentLength > maximum {
-		return nil, errors.New("download exceeds size limit")
+		return nil, errors.New("下载内容超过大小限制")
 	}
 	limited := io.LimitReader(response.Body, maximum+1)
 	data, err := io.ReadAll(limited)
@@ -286,7 +286,7 @@ func (m Manager) download(ctx context.Context, url string, maximum int64) ([]byt
 		return nil, err
 	}
 	if int64(len(data)) > maximum {
-		return nil, errors.New("download exceeds size limit")
+		return nil, errors.New("下载内容超过大小限制")
 	}
 	return data, nil
 }
@@ -320,7 +320,7 @@ func manifestEntry(manifest []byte, filename string) (string, error) {
 		return "", err
 	}
 	if len(matches) != 1 {
-		return "", fmt.Errorf("verified manifest must contain exactly one %s entry", filename)
+		return "", fmt.Errorf("已验证清单必须且只能包含一条 %s 记录", filename)
 	}
 	return matches[0], nil
 }

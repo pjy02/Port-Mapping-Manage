@@ -32,7 +32,7 @@ func (s Store) Load() (model.RuleSet, error) {
 	defer file.Close()
 	set, err := model.Decode(file)
 	if err != nil {
-		return model.RuleSet{}, fmt.Errorf("load rule database: %w", err)
+		return model.RuleSet{}, fmt.Errorf("加载规则数据库失败：%w", err)
 	}
 	return set, nil
 }
@@ -58,7 +58,7 @@ func (s Store) Backup(set model.RuleSet) (string, error) {
 		return "", err
 	}
 	if err := s.PruneBackups(); err != nil {
-		return path, fmt.Errorf("backup created but retention cleanup failed: %w", err)
+		return path, fmt.Errorf("备份已创建，但清理过期备份失败：%w", err)
 	}
 	return path, nil
 }
@@ -92,7 +92,7 @@ func (s Store) DeleteBackup(path string) error {
 	}
 	name := filepath.Base(cleanPath)
 	if filepath.Dir(cleanPath) != cleanDir || !strings.HasPrefix(name, "rules-") || !strings.HasSuffix(name, ".json") {
-		return fmt.Errorf("refusing to remove non-PMM backup %s", path)
+		return fmt.Errorf("文件不属于 PMM 备份目录，拒绝删除：%s", path)
 	}
 	info, err := os.Lstat(cleanPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -102,7 +102,7 @@ func (s Store) DeleteBackup(path string) error {
 		return err
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing to remove non-regular backup %s", path)
+		return fmt.Errorf("备份路径不是普通文件，拒绝删除：%s", path)
 	}
 	return os.Remove(cleanPath)
 }

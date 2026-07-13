@@ -26,7 +26,7 @@ func Acquire(ctx context.Context, path string, timeout time.Duration) (Handle, e
 			return handle, nil
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timed out waiting for lock %s", path)
+			return nil, fmt.Errorf("等待操作锁超时：%s", path)
 		}
 		select {
 		case <-ctx.Done():

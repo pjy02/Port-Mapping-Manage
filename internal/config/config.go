@@ -45,7 +45,7 @@ func Load(path string) (Config, error) {
 	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&config); err != nil {
-		return Config{}, fmt.Errorf("decode config: %w", err)
+		return Config{}, fmt.Errorf("解析配置文件失败：%w", err)
 	}
 	if err := ensureEOF(decoder); err != nil {
 		return Config{}, err
@@ -60,7 +60,7 @@ func ensureEOF(decoder *json.Decoder) error {
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return errors.New("config contains multiple JSON values")
+			return errors.New("配置文件包含多个 JSON 值")
 		}
 		return err
 	}
@@ -74,14 +74,14 @@ func applyEnvironment(config *Config) error {
 	if value := os.Getenv("PMM_AUTO_BACKUP"); value != "" {
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
-			return fmt.Errorf("PMM_AUTO_BACKUP: %w", err)
+			return fmt.Errorf("PMM_AUTO_BACKUP 的值 %q 无效，只能使用 true 或 false", value)
 		}
 		config.AutoBackup = parsed
 	}
 	if value := os.Getenv("PMM_VERBOSE"); value != "" {
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
-			return fmt.Errorf("PMM_VERBOSE: %w", err)
+			return fmt.Errorf("PMM_VERBOSE 的值 %q 无效，只能使用 true 或 false", value)
 		}
 		config.Verbose = parsed
 	}
@@ -90,25 +90,25 @@ func applyEnvironment(config *Config) error {
 
 func (c Config) Validate() error {
 	if c.SchemaVersion != 1 {
-		return fmt.Errorf("unsupported config schema %d", c.SchemaVersion)
+		return fmt.Errorf("不支持的配置结构版本 %d", c.SchemaVersion)
 	}
 	if c.Backend != "iptables" && c.Backend != "auto" {
-		return fmt.Errorf("invalid backend %q", c.Backend)
+		return fmt.Errorf("无效的防火墙后端 %q", c.Backend)
 	}
 	if c.MaxBackups < 1 || c.MaxBackups > 1000 {
-		return errors.New("max_backups must be between 1 and 1000")
+		return errors.New("max_backups 必须在 1 到 1000 之间")
 	}
 	if c.ReportRetention < 1 || c.ReportRetention > 1000 {
-		return errors.New("report_retention must be between 1 and 1000")
+		return errors.New("report_retention 必须在 1 到 1000 之间")
 	}
 	if c.LockTimeoutSeconds < 1 || c.LockTimeoutSeconds > 600 {
-		return errors.New("lock_timeout_seconds must be between 1 and 600")
+		return errors.New("lock_timeout_seconds 必须在 1 到 600 之间")
 	}
 	if c.PublicIPLookup != "menu" && c.PublicIPLookup != "on-demand" && c.PublicIPLookup != "off" {
-		return fmt.Errorf("invalid public_ip_lookup %q", c.PublicIPLookup)
+		return fmt.Errorf("无效的 public_ip_lookup 配置 %q", c.PublicIPLookup)
 	}
 	if c.ConflictPolicy != "strict" && c.ConflictPolicy != "warn" {
-		return fmt.Errorf("invalid conflict_policy %q", c.ConflictPolicy)
+		return fmt.Errorf("无效的 conflict_policy 配置 %q", c.ConflictPolicy)
 	}
 	return nil
 }

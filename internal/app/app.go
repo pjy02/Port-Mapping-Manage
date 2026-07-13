@@ -55,7 +55,7 @@ func (a App) Add(ctx context.Context, rule model.Rule) (transaction.Result, erro
 	}
 	for _, existing := range set.Rules {
 		if existing.CanonicalKey() == rule.CanonicalKey() {
-			return transaction.Result{}, fmt.Errorf("rule already exists as %s", existing.ID)
+			return transaction.Result{}, fmt.Errorf("相同规则已经存在，规则 ID 为 %s", existing.ID)
 		}
 	}
 	if err := ensureUniqueID(&rule, set.Rules); err != nil {
@@ -110,7 +110,7 @@ func (a App) mutate(ctx context.Context, operation, id string, fn func(*model.Ru
 			return a.Tx.Apply(ctx, operation, set)
 		}
 	}
-	return transaction.Result{}, fmt.Errorf("rule %s not found", id)
+	return transaction.Result{}, fmt.Errorf("找不到规则 %s", id)
 }
 
 func (a App) Import(ctx context.Context, r io.Reader, legacyIPVersion int, replace bool) (transaction.Result, int, error) {
@@ -159,14 +159,14 @@ func ensureUniqueID(rule *model.Rule, existing []model.Rule) error {
 	for attempt := 0; attempt < 8; attempt++ {
 		bytes := make([]byte, 8)
 		if _, err := rand.Read(bytes); err != nil {
-			return fmt.Errorf("generate rule ID: %w", err)
+			return fmt.Errorf("生成规则 ID 失败：%w", err)
 		}
 		rule.ID = hex.EncodeToString(bytes)
 		if !used(rule.ID) {
 			return nil
 		}
 	}
-	return errors.New("could not allocate a unique rule ID")
+	return errors.New("无法分配唯一的规则 ID")
 }
 
 func (a App) Export(ctx context.Context, w io.Writer, format string) error {
@@ -175,7 +175,7 @@ func (a App) Export(ctx context.Context, w io.Writer, format string) error {
 		return err
 	}
 	if state.Drift {
-		return errors.New("database and kernel state differ; refusing to export an ambiguous state")
+		return errors.New("数据库与内核规则不一致，拒绝导出含义不明确的状态")
 	}
 	switch format {
 	case "pipe":
@@ -185,7 +185,7 @@ func (a App) Export(ctx context.Context, w io.Writer, format string) error {
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(state.Database)
 	default:
-		return fmt.Errorf("unknown export format %q", format)
+		return fmt.Errorf("未知导出格式 %q", format)
 	}
 }
 
@@ -195,7 +195,7 @@ func (a App) Backup(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if state.Drift {
-		return "", errors.New("database and kernel state differ; refusing to create a misleading backup")
+		return "", errors.New("数据库与内核规则不一致，拒绝创建可能误导恢复的备份")
 	}
 	return a.Store.Backup(state.Database)
 }
@@ -233,10 +233,10 @@ func (a App) Doctor(ctx context.Context) (State, []string, error) {
 		issues = append(issues, "IPv6 项目专属链尚未创建")
 	}
 	if len(state.Kernel.IPv4.OrphanChains) > 0 {
-		issues = append(issues, fmt.Sprintf("IPv4 存在未激活候选链: %s", strings.Join(state.Kernel.IPv4.OrphanChains, ", ")))
+		issues = append(issues, fmt.Sprintf("IPv4 存在未激活候选链：%s", strings.Join(state.Kernel.IPv4.OrphanChains, ", ")))
 	}
 	if len(state.Kernel.IPv6.OrphanChains) > 0 {
-		issues = append(issues, fmt.Sprintf("IPv6 存在未激活候选链: %s", strings.Join(state.Kernel.IPv6.OrphanChains, ", ")))
+		issues = append(issues, fmt.Sprintf("IPv6 存在未激活候选链：%s", strings.Join(state.Kernel.IPv6.OrphanChains, ", ")))
 	}
 	return state, issues, nil
 }

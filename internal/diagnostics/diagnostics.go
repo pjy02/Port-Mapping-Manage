@@ -67,7 +67,7 @@ func (s Service) Collect(ctx context.Context) (Report, error) {
 	}
 	report.System = collectSystemInfo(s.ProcRoot)
 	if external, inspectErr := s.App.Backend.InspectExternal(ctx); inspectErr != nil {
-		report.Issues = append(report.Issues, "外部规则检查失败: "+inspectErr.Error())
+		report.Issues = append(report.Issues, "外部规则检查失败："+inspectErr.Error())
 	} else {
 		report.ExternalRules = len(external)
 		for _, rule := range state.Database.Rules {
@@ -76,7 +76,7 @@ func (s Service) Collect(ctx context.Context) (Report, error) {
 			}
 			for _, other := range external {
 				if rule.IPVersion == other.IPVersion && rule.Protocol == other.Protocol && rule.StartPort <= other.EndPort && rule.EndPort >= other.StartPort {
-					report.Issues = append(report.Issues, fmt.Sprintf("规则 %s 与外部规则冲突: %s", rule.ID, other.Raw))
+					report.Issues = append(report.Issues, fmt.Sprintf("规则 %s 与外部规则冲突：%s", rule.ID, other.Raw))
 				}
 			}
 		}
@@ -85,7 +85,7 @@ func (s Service) Collect(ctx context.Context) (Report, error) {
 		status := s.Persistence.Check(ctx)
 		report.Persistence = &status
 		if status.Error != "" {
-			report.Issues = append(report.Issues, "持久化检查失败: "+status.Error)
+			report.Issues = append(report.Issues, "持久化检查失败："+status.Error)
 		}
 	}
 	for _, rule := range state.Database.Rules {
@@ -93,7 +93,7 @@ func (s Service) Collect(ctx context.Context) (Report, error) {
 			result := s.Inspector.Check(rule)
 			report.Listeners = append(report.Listeners, result)
 			if result.Status != listener.Up {
-				report.Issues = append(report.Issues, fmt.Sprintf("IPv%d/%s 目标端口 %d 监听状态为 %s", result.IPVersion, result.Protocol, result.Port, result.Status))
+				report.Issues = append(report.Issues, fmt.Sprintf("IPv%d/%s 目标端口 %d 监听状态为%s", result.IPVersion, result.Protocol, result.Port, listener.StatusText(result.Status)))
 			}
 		}
 	}

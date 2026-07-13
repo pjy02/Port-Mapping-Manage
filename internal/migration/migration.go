@@ -80,7 +80,7 @@ func (m Manager) Plan(ctx context.Context, source Source) (Plan, error) {
 	case Auto:
 		if len(databaseRules) > 0 && len(kernelRules) > 0 && !sameRules(databaseRules, kernelRules) {
 			plan.Ambiguous = true
-			return plan, errors.New("legacy database and kernel rules differ; select --source kernel or --source database")
+			return plan, errors.New("旧版数据库与内核规则不一致；请明确选择 --source kernel 或 --source database")
 		}
 		if len(kernelRules) > 0 {
 			plan.SelectedRules = kernelRules
@@ -88,7 +88,7 @@ func (m Manager) Plan(ctx context.Context, source Source) (Plan, error) {
 			plan.SelectedRules = databaseRules
 		}
 	default:
-		return Plan{}, fmt.Errorf("invalid migration source %q", source)
+		return Plan{}, fmt.Errorf("无效的迁移来源 %q", source)
 	}
 	set := model.NewRuleSet()
 	set.Rules = append([]model.Rule(nil), plan.SelectedRules...)
@@ -97,16 +97,16 @@ func (m Manager) Plan(ctx context.Context, source Source) (Plan, error) {
 	}
 	plan.SelectedRules = set.Rules
 	if len(plan.SelectedRules) == 0 && len(plan.KernelRules) == 0 {
-		return plan, errors.New("no legacy PMM rules or database records were found")
+		return plan, errors.New("没有找到旧版 PMM 规则或数据库记录")
 	}
 	external, err := m.Backend.InspectExternalExceptComment(ctx, LegacyComment)
 	if err != nil {
-		return plan, fmt.Errorf("inspect non-legacy rules: %w", err)
+		return plan, fmt.Errorf("检查非旧版规则失败：%w", err)
 	}
 	for _, rule := range plan.SelectedRules {
 		for _, other := range external {
 			if rule.IPVersion == other.IPVersion && rule.Protocol == other.Protocol && rule.StartPort <= other.EndPort && rule.EndPort >= other.StartPort {
-				return plan, fmt.Errorf("legacy rule %s conflicts with external rule: %s", rule.ID, other.Raw)
+				return plan, fmt.Errorf("旧版规则 %s 与外部规则冲突：%s", rule.ID, other.Raw)
 			}
 		}
 	}
@@ -115,7 +115,7 @@ func (m Manager) Plan(ctx context.Context, source Source) (Plan, error) {
 
 func (m Manager) Execute(ctx context.Context, plan Plan) (transaction.Result, error) {
 	if plan.Ambiguous {
-		return transaction.Result{}, errors.New("ambiguous migration plan")
+		return transaction.Result{}, errors.New("迁移计划存在歧义，无法安全执行")
 	}
 	set := model.NewRuleSet()
 	set.Rules = append([]model.Rule(nil), plan.SelectedRules...)
@@ -154,7 +154,7 @@ func (m Manager) Execute(ctx context.Context, plan Plan) (transaction.Result, er
 	journal.Phase, journal.UpdatedAt = "NEW_CHAIN_VERIFIED", time.Now().UTC()
 	_ = storage.WriteJSONAtomic(journalPath, journal, 0o600)
 	if err := m.Backend.DeleteLegacy(ctx, LegacyComment, plan.KernelRules); err != nil {
-		failure := m.restoreLegacyAfterFailure(ctx, plan, fmt.Errorf("delete legacy rules: %w", err))
+		failure := m.restoreLegacyAfterFailure(ctx, plan, fmt.Errorf("删除旧版规则失败：%w", err))
 		journal.Phase, journal.Error, journal.UpdatedAt = "ROLLED_BACK", failure.Error(), time.Now().UTC()
 		_ = storage.WriteJSONAtomic(journalPath, journal, 0o600)
 		return result, failure
@@ -162,14 +162,14 @@ func (m Manager) Execute(ctx context.Context, plan Plan) (transaction.Result, er
 	journal.Phase, journal.UpdatedAt = "LEGACY_DELETED", time.Now().UTC()
 	_ = storage.WriteJSONAtomic(journalPath, journal, 0o600)
 	if err := m.Store.Save(set); err != nil {
-		failure := m.restoreLegacyAfterFailure(ctx, plan, fmt.Errorf("commit migrated database: %w", err))
+		failure := m.restoreLegacyAfterFailure(ctx, plan, fmt.Errorf("提交迁移后的数据库失败：%w", err))
 		journal.Phase, journal.Error, journal.UpdatedAt = "ROLLED_BACK", failure.Error(), time.Now().UTC()
 		_ = storage.WriteJSONAtomic(journalPath, journal, 0o600)
 		return result, failure
 	}
 	journal.Phase, journal.Error, journal.UpdatedAt = "COMMITTED", "", time.Now().UTC()
 	if err := storage.WriteJSONAtomic(journalPath, journal, 0o600); err != nil {
-		return result, fmt.Errorf("migration committed but journal update failed: %w", err)
+		return result, fmt.Errorf("迁移已提交，但更新迁移日志失败：%w", err)
 	}
 	return result, nil
 }
@@ -179,7 +179,7 @@ func (m Manager) restoreLegacyAfterFailure(ctx context.Context, plan Plan, cause
 	legacyErr := m.Backend.RestoreLegacy(ctx, LegacyComment, plan.KernelRules)
 	serviceErr := m.restoreLegacyService(ctx, plan)
 	if managedErr != nil || legacyErr != nil || serviceErr != nil {
-		return fmt.Errorf("migration failed: %v; managed cleanup: %v; legacy restore: %v; service restore: %v", cause, managedErr, legacyErr, serviceErr)
+		return fmt.Errorf("迁移失败：%v；清理新规则错误：%v；恢复旧规则错误：%v；恢复服务错误：%v", cause, managedErr, legacyErr, serviceErr)
 	}
 	return cause
 }
@@ -214,11 +214,11 @@ func (m Manager) inspectLegacyService(ctx context.Context, plan *Plan) error {
 		return err
 	}
 	if string(data) != m.legacyUnit() {
-		return errors.New("pmm-rules.service exists but does not exactly match the legacy PMM unit; refusing migration")
+		return errors.New("pmm-rules.service 已存在，但内容与旧版 PMM 服务不完全匹配，拒绝迁移")
 	}
 	plan.LegacyServiceOwned = true
 	if m.Runner == nil {
-		return errors.New("cannot inspect legacy persistence without a command runner")
+		return errors.New("缺少命令执行器，无法检查旧版持久化服务")
 	}
 	if result, err := m.Runner.Run(ctx, "systemctl", "is-enabled", persistence.ServiceName); err == nil && strings.TrimSpace(result.Stdout) == "enabled" {
 		plan.LegacyServiceEnabled = true
@@ -234,7 +234,7 @@ func (m Manager) disableLegacyService(ctx context.Context, plan Plan) error {
 		return nil
 	}
 	if m.Runner == nil {
-		return errors.New("cannot disable legacy persistence without a command runner")
+		return errors.New("缺少命令执行器，无法禁用旧版持久化服务")
 	}
 	if plan.LegacyServiceEnabled || plan.LegacyServiceActive {
 		if _, err := m.Runner.Run(ctx, "systemctl", "disable", "--now", persistence.ServiceName); err != nil {
@@ -255,7 +255,7 @@ func (m Manager) restoreLegacyService(ctx context.Context, plan Plan) error {
 		return nil
 	}
 	if m.Runner == nil {
-		return errors.New("cannot restore legacy persistence without a command runner")
+		return errors.New("缺少命令执行器，无法恢复旧版持久化服务")
 	}
 	if err := storage.WriteFileAtomic(m.ServicePath, []byte(m.legacyUnit()), 0o644); err != nil {
 		return err

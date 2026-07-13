@@ -70,7 +70,7 @@ func (c cli) menu(ctx context.Context) error {
 			fmt.Fprintln(c.stderr, "无效选择")
 		}
 		if actionErr != nil {
-			fmt.Fprintln(c.stderr, "错误:", actionErr)
+			fmt.Fprintln(c.stderr, "错误："+localizedErrorText(actionErr))
 		}
 		if interactive {
 			if err := in.pause(); err != nil {

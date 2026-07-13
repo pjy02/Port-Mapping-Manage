@@ -21,6 +21,21 @@ const (
 	Error Status = "ERROR"
 )
 
+// StatusText 返回适合终端和诊断报告显示的中文状态。
+// Status 的原始值继续保持稳定，避免破坏 JSON 和外部集成兼容性。
+func StatusText(status Status) string {
+	switch status {
+	case Up:
+		return "正常监听"
+	case Down:
+		return "未监听"
+	case Error:
+		return "检查失败"
+	default:
+		return string(status)
+	}
+}
+
 type Result struct {
 	RuleID    string         `json:"rule_id"`
 	IPVersion int            `json:"ip_version"`
@@ -40,14 +55,14 @@ func (i Inspector) Check(rule model.Rule) Result {
 	file, err := os.Open(path)
 	if err != nil {
 		result.Status = Error
-		result.Error = err.Error()
+		result.Error = readErrorText(err)
 		return result
 	}
 	defer file.Close()
 	found, err := containsPort(file, rule.TargetPort, rule.Protocol)
 	if err != nil {
 		result.Status = Error
-		result.Error = err.Error()
+		result.Error = readErrorText(err)
 		return result
 	}
 	if found {
@@ -115,7 +130,7 @@ func scanSockets(r io.Reader, port uint16, protocol model.Protocol, wildcardOnly
 		}
 		parsed, err := strconv.ParseUint(address[1], 16, 16)
 		if err != nil {
-			return false, fmt.Errorf("parse socket port: %w", err)
+			return false, fmt.Errorf("解析套接字端口失败：%w", err)
 		}
 		if uint16(parsed) != port {
 			continue
@@ -140,10 +155,21 @@ func ValidateProcRoot(root string) error {
 	}
 	info, err := os.Stat(root)
 	if err != nil {
-		return err
+		return fmt.Errorf("检查 proc 根路径失败：%w", err)
 	}
 	if !info.IsDir() {
-		return errors.New("proc root is not a directory")
+		return errors.New("proc 根路径不是目录")
 	}
 	return nil
+}
+
+func readErrorText(err error) string {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "无法读取系统监听信息：文件或目录不存在"
+	case errors.Is(err, os.ErrPermission):
+		return "无法读取系统监听信息：权限不足"
+	default:
+		return "读取系统监听信息失败：" + err.Error()
+	}
 }

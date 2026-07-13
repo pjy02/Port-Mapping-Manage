@@ -23,22 +23,22 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-info() { printf '\033[0;32m[INFO]\033[0m %s\n' "$*"; }
-error() { printf '\033[0;31m[ERROR]\033[0m %s\n' "$*" >&2; }
+info() { printf '\033[0;32m[信息]\033[0m %s\n' "$*"; }
+error() { printf '\033[0;31m[错误]\033[0m %s\n' "$*" >&2; }
 
 usage() {
     cat <<'EOF'
-Install Port Mapping Manager from a signed GitHub release.
+从经过签名验证的 GitHub Release 安装端口映射管理器。
 
-Usage: install_pmm.sh [options]
-  --version vX.Y.Z  install an exact release (default: latest stable)
-  --no-deps         do not install missing curl/OpenSSL/iptables packages
-  --verify-only     verify the release without installing it
-  --help            show this help
+用法：install_pmm.sh [选项]
+  --version vX.Y.Z  安装指定版本（默认：最新稳定版）
+  --no-deps         不自动安装缺少的 curl、OpenSSL、iptables 依赖
+  --verify-only     只验证发布文件，不执行安装
+  --help            显示此帮助
 
-The installer never creates firewall rules, migrates old data, or enables
-persistence. PMM_MANIFEST_SHA256 may pin an independently obtained manifest
-digest in addition to the mandatory release signature.
+安装器不会创建防火墙规则、迁移旧数据或启用持久化。
+除强制验证发布签名外，还可通过 PMM_MANIFEST_SHA256 固定从独立可信渠道
+获得的发布清单摘要。
 EOF
 }
 
@@ -46,7 +46,7 @@ parse_arguments() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --version)
-                [ "$#" -ge 2 ] || { error "--version requires vX.Y.Z"; return 1; }
+                [ "$#" -ge 2 ] || { error "--version 需要提供 vX.Y.Z 格式的版本号"; return 1; }
                 RELEASE_REF=$2
                 shift 2
                 ;;
@@ -63,7 +63,7 @@ parse_arguments() {
                 exit 0
                 ;;
             *)
-                error "unknown option: $1"
+                error "未知安装选项：$1"
                 usage >&2
                 return 1
                 ;;
@@ -75,7 +75,7 @@ detect_architecture() {
     case "$(uname -m)" in
         x86_64|amd64) printf '%s\n' amd64 ;;
         aarch64|arm64) printf '%s\n' arm64 ;;
-        *) error "unsupported architecture: $(uname -m)"; return 1 ;;
+        *) error "不支持的处理器架构：$(uname -m)"; return 1 ;;
     esac
 }
 
@@ -94,7 +94,7 @@ detect_package_manager() {
 prepare_privilege() {
     if [ "$(id -u)" -ne 0 ] && [ ${#SUDO[@]} -eq 0 ]; then
         command -v sudo >/dev/null 2>&1 || {
-            error "installation requires root or sudo"
+            error "安装需要 root 权限，当前系统也未找到 sudo"
             return 1
         }
         SUDO=(sudo)
@@ -103,7 +103,7 @@ prepare_privilege() {
 
 install_packages() {
     [ "$INSTALL_DEPENDENCIES" = true ] || {
-        error "missing dependencies and --no-deps was selected: $*"
+        error "缺少以下依赖，但已经指定 --no-deps：$*"
         return 1
     }
     prepare_privilege
@@ -115,7 +115,7 @@ install_packages() {
             ;;
         dnf|yum) "${SUDO[@]}" "$PACKAGE_MANAGER" install -y -q "$@" ;;
         pacman) "${SUDO[@]}" pacman -Sy --noconfirm --needed "$@" ;;
-        *) error "cannot install missing dependencies: $*"; return 1 ;;
+        *) error "未找到受支持的包管理器，无法安装依赖：$*"; return 1 ;;
     esac
 }
 
@@ -125,38 +125,47 @@ ensure_verification_tools() {
     command -v openssl >/dev/null 2>&1 || missing+=(openssl)
     command -v sha256sum >/dev/null 2>&1 || missing+=(coreutils)
     [ ${#missing[@]} -eq 0 ] || install_packages "${missing[@]}"
-    command -v curl >/dev/null 2>&1 || { error "curl is required"; return 1; }
-    command -v openssl >/dev/null 2>&1 || { error "OpenSSL is required"; return 1; }
-    command -v sha256sum >/dev/null 2>&1 || { error "sha256sum is required"; return 1; }
+    command -v curl >/dev/null 2>&1 || { error "缺少必需命令：curl"; return 1; }
+    command -v openssl >/dev/null 2>&1 || { error "缺少必需命令：OpenSSL"; return 1; }
+    command -v sha256sum >/dev/null 2>&1 || { error "缺少必需命令：sha256sum"; return 1; }
 }
 
 resolve_release() {
     local effective
     if [ "$RELEASE_REF" = latest ]; then
         [ -z "$LOCAL_SOURCE_DIR" ] || {
-            error "local verification requires an explicit PMM_RELEASE_REF"
+            error "使用本地发布文件验证时，必须显式设置 PMM_RELEASE_REF"
             return 1
         }
-        effective=$(curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+        if ! effective=$(curl --proto '=https' --tlsv1.2 --fail --location --silent \
             --connect-timeout 10 --max-time 60 --output /dev/null --write-out '%{url_effective}' \
-            "$LATEST_URL")
+            "$LATEST_URL"); then
+            error "无法查询最新发布版本，请检查网络连接和 GitHub Release 是否存在"
+            return 1
+        fi
         RELEASE_REF=${effective##*/}
     fi
     [[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]] || {
-        error "release reference must be latest or an immutable semantic-version tag"
+        error "版本必须是 latest 或不可变的语义化版本标签（例如 v6.0.1）"
         return 1
     }
-    info "selected release $RELEASE_REF"
+    info "已选择发布版本：$RELEASE_REF"
 }
 
 fetch_file() {
     local name=$1 destination=$2
     if [ -n "$LOCAL_SOURCE_DIR" ]; then
-        cp -- "$LOCAL_SOURCE_DIR/$name" "$destination"
+        cp -- "$LOCAL_SOURCE_DIR/$name" "$destination" || {
+            error "读取本地发布文件失败：$name"
+            return 1
+        }
     else
-        curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+        curl --proto '=https' --tlsv1.2 --fail --location --silent \
             --connect-timeout 10 --max-time 120 \
-            "$REMOTE_BASE/$RELEASE_REF/$name" -o "$destination"
+            "$REMOTE_BASE/$RELEASE_REF/$name" -o "$destination" || {
+                error "下载发布文件失败：$name（版本 $RELEASE_REF）"
+                return 1
+            }
     fi
 }
 
@@ -164,7 +173,7 @@ write_public_key() {
     local destination=$1
     if [ -n "$LOCAL_PUBLIC_KEY" ]; then
         [ -n "$LOCAL_SOURCE_DIR" ] || {
-            error "PMM_PUBLIC_KEY_FILE is accepted only with PMM_LOCAL_SOURCE_DIR"
+            error "PMM_PUBLIC_KEY_FILE 只能与 PMM_LOCAL_SOURCE_DIR 同时使用"
             return 1
         }
         cp -- "$LOCAL_PUBLIC_KEY" "$destination"
@@ -194,7 +203,7 @@ require_maximum_size() {
     local path=$1 maximum=$2 description=$3 size
     size=$(wc -c < "$path")
     [ "$size" -le "$maximum" ] || {
-        error "$description exceeds the size limit"
+        error "$description 超过允许的大小限制"
         return 1
     }
 }
@@ -208,48 +217,51 @@ verify_release() {
 
     fetch_file release-manifest.sha256 "$manifest"
     fetch_file release-manifest.sha256.sig "$signature"
-    require_maximum_size "$manifest" 1048576 "release manifest"
-    require_maximum_size "$signature" 65536 "release manifest signature"
+    require_maximum_size "$manifest" 1048576 "发布清单"
+    require_maximum_size "$signature" 65536 "发布清单签名"
     write_public_key "$public_key"
     openssl dgst -sha256 -verify "$public_key" -signature "$signature" "$manifest" >/dev/null 2>&1 || {
-        error "release manifest signature is invalid"
+        error "发布清单签名无效，已拒绝安装"
         return 1
     }
     actual_manifest=$(sha256sum "$manifest" | awk '{print tolower($1)}')
     if [ -n "$EXPECTED_MANIFEST_SHA256" ]; then
         [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || {
-            error "PMM_MANIFEST_SHA256 must be a 64-character digest"
+            error "PMM_MANIFEST_SHA256 必须是 64 位十六进制摘要"
             return 1
         }
         [ "$actual_manifest" = "${EXPECTED_MANIFEST_SHA256,,}" ] || {
-            error "release manifest does not match the additionally pinned SHA-256"
+            error "发布清单与额外固定的 SHA-256 摘要不匹配"
             return 1
         }
     fi
 
     count=$(awk -v name="$binary_name" 'NF == 2 && $2 == name {count++} END {print count+0}' "$manifest")
     [ "$count" -eq 1 ] || {
-        error "signed manifest must contain exactly one $binary_name entry"
+        error "已签名清单必须且只能包含一条 $binary_name 记录"
         return 1
     }
     expected_binary=$(manifest_hash_for "$binary_name" "$manifest")
-    [ -n "$expected_binary" ] || { error "manifest entry for $binary_name is invalid"; return 1; }
+    [ -n "$expected_binary" ] || { error "清单中的 $binary_name 记录无效"; return 1; }
     fetch_file "$binary_name" "$TMP_DIR/$binary_name"
     require_maximum_size "$TMP_DIR/$binary_name" 134217728 "$binary_name"
     actual_binary=$(sha256sum "$TMP_DIR/$binary_name" | awk '{print tolower($1)}')
     [ "$actual_binary" = "$expected_binary" ] || {
-        error "$binary_name does not match the signed manifest"
+        error "$binary_name 的 SHA-256 与已签名清单不匹配"
         return 1
     }
     chmod 0755 "$TMP_DIR/$binary_name"
     "$TMP_DIR/$binary_name" version >/dev/null || {
-        error "verified payload cannot execute on this host"
+        error "验证通过的程序无法在当前服务器上运行"
         return 1
     }
-    openssl pkey -pubin -in "$public_key" -outform DER -out "$TMP_DIR/public-key.der"
+    openssl pkey -pubin -in "$public_key" -outform DER -out "$TMP_DIR/public-key.der" >/dev/null 2>&1 || {
+        error "发布公钥格式无效，已拒绝安装"
+        return 1
+    }
     PUBLIC_KEY_SHA256=$(sha256sum "$TMP_DIR/public-key.der" | awk '{print tolower($1)}')
     VERIFIED_MANIFEST_SHA256=$actual_manifest
-    info "manifest signature and binary SHA-256 verification passed"
+    info "发布签名和程序 SHA-256 校验通过"
 }
 
 ensure_runtime_dependencies() {
@@ -258,8 +270,8 @@ ensure_runtime_dependencies() {
         missing+=(iptables)
     fi
     [ ${#missing[@]} -eq 0 ] || install_packages "${missing[@]}"
-    command -v iptables >/dev/null 2>&1 || { error "iptables is required"; return 1; }
-    command -v ip6tables >/dev/null 2>&1 || { error "ip6tables is required"; return 1; }
+    command -v iptables >/dev/null 2>&1 || { error "缺少必需命令：iptables"; return 1; }
+    command -v ip6tables >/dev/null 2>&1 || { error "缺少必需命令：ip6tables"; return 1; }
 }
 
 install_verified_binary() {
@@ -272,22 +284,22 @@ install_verified_binary() {
 
     for directory in "$INSTALL_DIR" "$CONFIG_DIR"; do
         if "${SUDO[@]}" test -L "$directory"; then
-            error "refusing to use symlink directory: $directory"
+            error "为避免路径劫持，拒绝使用符号链接目录：$directory"
             return 1
         fi
         if "${SUDO[@]}" test -e "$directory" && ! "${SUDO[@]}" test -d "$directory"; then
-            error "refusing to use non-directory path: $directory"
+            error "安装路径存在但不是目录：$directory"
             return 1
         fi
     done
     "${SUDO[@]}" install -d -m 0755 "$INSTALL_DIR" "$CONFIG_DIR"
     if "${SUDO[@]}" test -e "$candidate" || "${SUDO[@]}" test -e "$rollback" || \
        "${SUDO[@]}" test -e "$trust_candidate" || "${SUDO[@]}" test -e "$previous_trust"; then
-        error "installer staging path already exists"
+        error "安装暂存路径已存在，为避免覆盖未知文件已停止安装"
         return 1
     fi
     if "${SUDO[@]}" test -e "$target" && ! "${SUDO[@]}" test -f "$target"; then
-        error "refusing to replace a non-regular pmm path"
+        error "目标 pmm 路径不是普通文件，拒绝替换"
         return 1
     fi
     "${SUDO[@]}" install -m 0755 "$TMP_DIR/$binary_name" "$candidate"
@@ -304,18 +316,20 @@ install_verified_binary() {
     if ! "${SUDO[@]}" mv -- "$candidate" "$target"; then
         "${SUDO[@]}" test ! -e "$rollback" || "${SUDO[@]}" mv -- "$rollback" "$target"
         "${SUDO[@]}" test ! -e "$previous_trust" || "${SUDO[@]}" mv -- "$previous_trust" "$CONFIG_DIR/trusted-release.json"
+        error "替换 pmm 程序失败，已尝试恢复原版本"
         return 1
     fi
     if ! "${SUDO[@]}" mv -- "$trust_candidate" "$CONFIG_DIR/trusted-release.json"; then
         "${SUDO[@]}" rm -f -- "$target"
         "${SUDO[@]}" test ! -e "$rollback" || "${SUDO[@]}" mv -- "$rollback" "$target"
         "${SUDO[@]}" test ! -e "$previous_trust" || "${SUDO[@]}" mv -- "$previous_trust" "$CONFIG_DIR/trusted-release.json"
+        error "保存发布信任记录失败，已尝试恢复原版本"
         return 1
     fi
     "${SUDO[@]}" rm -f -- "$rollback" "$previous_trust"
-    info "installed Port Mapping Manager $RELEASE_REF"
-    info "no firewall, migration, or startup configuration was changed"
-    info "run 'pmm' for the menu or 'pmm help' for commands"
+    info "端口映射管理器 $RELEASE_REF 安装完成"
+    info "安装过程未修改防火墙规则、迁移数据或开机启动配置"
+    info "运行 'pmm' 进入管理面板，运行 'pmm help' 查看命令帮助"
 }
 
 main() {

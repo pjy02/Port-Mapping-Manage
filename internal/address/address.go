@@ -37,7 +37,7 @@ type Resolver struct {
 
 func (r Resolver) Resolve(ctx context.Context, version int, refresh bool) (Result, error) {
 	if version != 4 && version != 6 {
-		return Result{}, errors.New("IP version must be 4 or 6")
+		return Result{}, errors.New("IP 版本只能是 4 或 6")
 	}
 	if r.Now == nil {
 		r.Now = time.Now
@@ -75,7 +75,7 @@ func (r Resolver) Resolve(ctx context.Context, version int, refresh bool) (Resul
 			continue
 		}
 		if err := storage.WriteJSONAtomic(cachePath, result, 0o600); err != nil {
-			return Result{}, fmt.Errorf("save IPv%d cache: %w", version, err)
+			return Result{}, fmt.Errorf("保存 IPv%d 公网地址缓存失败：%w", version, err)
 		}
 		return result, nil
 	}
@@ -88,7 +88,7 @@ func (r Resolver) Resolve(ctx context.Context, version int, refresh bool) (Resul
 			return result, nil
 		}
 	}
-	return Result{}, fmt.Errorf("resolve IPv%d public address: %w", version, errors.Join(failures...))
+	return Result{}, fmt.Errorf("查询 IPv%d 公网地址失败：%w", version, errors.Join(failures...))
 }
 
 func (r Resolver) loadCache(path string, version int) (Result, error) {
@@ -104,7 +104,7 @@ func (r Resolver) loadCache(path string, version int) (Result, error) {
 		return Result{}, err
 	}
 	if result.IPVersion != version || !validFamily(net.ParseIP(result.IP), version) || result.CheckedAt.IsZero() {
-		return Result{}, errors.New("cache family or address is invalid")
+		return Result{}, errors.New("缓存中的 IP 版本或地址无效")
 	}
 	return result, nil
 }
@@ -121,7 +121,7 @@ func fetch(ctx context.Context, client *http.Client, endpoint string, version in
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return Result{}, fmt.Errorf("HTTP status %d", response.StatusCode)
+		return Result{}, fmt.Errorf("HTTP 返回状态码 %d", response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 256))
 	if err != nil {
@@ -129,7 +129,7 @@ func fetch(ctx context.Context, client *http.Client, endpoint string, version in
 	}
 	value := strings.TrimSpace(string(body))
 	if !validFamily(net.ParseIP(value), version) {
-		return Result{}, fmt.Errorf("response is not IPv%d", version)
+		return Result{}, fmt.Errorf("响应内容不是有效的 IPv%d 地址", version)
 	}
 	return Result{IP: value, IPVersion: version, Source: endpoint, CheckedAt: now}, nil
 }
@@ -164,5 +164,5 @@ func localGlobalAddress(version int) (net.IP, error) {
 			}
 		}
 	}
-	return nil, fmt.Errorf("no global IPv%d interface address", version)
+	return nil, fmt.Errorf("没有找到全局 IPv%d 网卡地址", version)
 }

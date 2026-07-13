@@ -62,22 +62,22 @@ func (r *Rule) EnsureID() {
 
 func (r Rule) Validate() error {
 	if r.IPVersion != 4 && r.IPVersion != 6 {
-		return fmt.Errorf("invalid IP version %d", r.IPVersion)
+		return fmt.Errorf("无效的 IP 版本 %d，只能使用 4 或 6", r.IPVersion)
 	}
 	if r.Protocol != TCP && r.Protocol != UDP {
-		return fmt.Errorf("invalid protocol %q", r.Protocol)
+		return fmt.Errorf("无效的协议 %q，只能使用 tcp 或 udp", r.Protocol)
 	}
 	if r.StartPort == 0 || r.EndPort == 0 || r.TargetPort == 0 {
-		return errors.New("ports must be between 1 and 65535")
+		return errors.New("端口必须在 1 到 65535 之间")
 	}
 	if r.StartPort > r.EndPort {
-		return errors.New("start port must not exceed end port")
+		return errors.New("起始端口不能大于结束端口")
 	}
 	if r.TargetPort >= r.StartPort && r.TargetPort <= r.EndPort {
-		return errors.New("target port must not be inside the source range")
+		return errors.New("目标端口不能位于来源端口范围内")
 	}
 	if len(r.Label) > 128 {
-		return errors.New("label exceeds 128 characters")
+		return errors.New("规则标签不能超过 128 个字符")
 	}
 	return nil
 }
@@ -87,7 +87,7 @@ func (s *RuleSet) Normalize(now time.Time) error {
 		s.SchemaVersion = SchemaVersion
 	}
 	if s.SchemaVersion != SchemaVersion {
-		return fmt.Errorf("unsupported schema version %d", s.SchemaVersion)
+		return fmt.Errorf("不支持的规则数据库结构版本 %d", s.SchemaVersion)
 	}
 	if s.Backend == "" {
 		s.Backend = "iptables"
@@ -99,14 +99,14 @@ func (s *RuleSet) Normalize(now time.Time) error {
 		r.Protocol = Protocol(strings.ToLower(string(r.Protocol)))
 		r.EnsureID()
 		if err := r.Validate(); err != nil {
-			return fmt.Errorf("rule %s: %w", r.ID, err)
+			return fmt.Errorf("规则 %s：%w", r.ID, err)
 		}
 		if _, exists := seenIDs[r.ID]; exists {
-			return fmt.Errorf("duplicate rule ID %s", r.ID)
+			return fmt.Errorf("规则 ID %s 重复", r.ID)
 		}
 		seenIDs[r.ID] = struct{}{}
 		if existingID, exists := seenCanonical[r.CanonicalKey()]; exists {
-			return fmt.Errorf("rules %s and %s have the same canonical tuple", existingID, r.ID)
+			return fmt.Errorf("规则 %s 和 %s 使用了相同的规则参数", existingID, r.ID)
 		}
 		seenCanonical[r.CanonicalKey()] = r.ID
 		if r.CreatedAt.IsZero() {
@@ -135,7 +135,7 @@ func (s *RuleSet) Normalize(now time.Time) error {
 				continue
 			}
 			if s.Rules[j].StartPort <= s.Rules[i].EndPort && s.Rules[j].EndPort >= s.Rules[i].StartPort {
-				return fmt.Errorf("rules %s and %s overlap", s.Rules[i].ID, s.Rules[j].ID)
+				return fmt.Errorf("规则 %s 和 %s 的端口范围重叠", s.Rules[i].ID, s.Rules[j].ID)
 			}
 		}
 	}
@@ -153,7 +153,7 @@ func Decode(r io.Reader) (RuleSet, error) {
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return RuleSet{}, errors.New("rule database contains multiple JSON values")
+			return RuleSet{}, errors.New("规则数据库包含多个 JSON 值")
 		}
 		return RuleSet{}, err
 	}
@@ -177,12 +177,12 @@ func ParsePipe(r io.Reader, legacyIPVersion int) ([]Rule, error) {
 		if strings.Contains(line, "|") {
 			fields = strings.Split(line, "|")
 			if len(fields) != 5 {
-				return nil, fmt.Errorf("line %d: expected five fields", lineNo)
+				return nil, fmt.Errorf("第 %d 行：应包含五个字段", lineNo)
 			}
 		} else {
 			legacy := strings.Split(line, ":")
 			if len(legacy) != 3 {
-				return nil, fmt.Errorf("line %d: invalid legacy record", lineNo)
+				return nil, fmt.Errorf("第 %d 行：旧版记录格式无效", lineNo)
 			}
 			fields = []string{strconv.Itoa(legacyIPVersion), string(UDP), legacy[0], legacy[1], legacy[2]}
 		}
@@ -191,7 +191,7 @@ func ParsePipe(r io.Reader, legacyIPVersion int) ([]Rule, error) {
 		for i, index := range indexes {
 			value, err := strconv.Atoi(strings.TrimSpace(fields[index]))
 			if err != nil || value < 0 || value > 65535 {
-				return nil, fmt.Errorf("line %d: invalid numeric field", lineNo)
+				return nil, fmt.Errorf("第 %d 行：数值字段无效", lineNo)
 			}
 			values[i] = value
 		}
@@ -201,7 +201,7 @@ func ParsePipe(r io.Reader, legacyIPVersion int) ([]Rule, error) {
 		}
 		rule.EnsureID()
 		if err := rule.Validate(); err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+			return nil, fmt.Errorf("第 %d 行：%w", lineNo, err)
 		}
 		rules = append(rules, rule)
 	}

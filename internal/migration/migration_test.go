@@ -34,7 +34,7 @@ func TestPlanRejectsExternalConflict(t *testing.T) {
 		legacyLine(),
 	}, "\n")
 	manager := Manager{Backend: firewall.NewIPTables(legacyRunner{ipv4: output}), LegacyDir: root}
-	if _, err := manager.Plan(context.Background(), Auto); err == nil || !strings.Contains(err.Error(), "conflicts with external") {
+	if _, err := manager.Plan(context.Background(), Auto); err == nil || !strings.Contains(err.Error(), "与外部规则冲突") {
 		t.Fatalf("external migration conflict was accepted: %v", err)
 	}
 }
@@ -53,7 +53,7 @@ func TestPlanRejectsForeignSameNameService(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := Manager{Backend: firewall.NewIPTables(legacyRunner{ipv4: legacyLine()}), LegacyDir: root, ServicePath: servicePath, Runner: legacyRunner{}}
-	if _, err := manager.Plan(context.Background(), Auto); err == nil || !strings.Contains(err.Error(), "does not exactly match") {
+	if _, err := manager.Plan(context.Background(), Auto); err == nil || !strings.Contains(err.Error(), "不完全匹配") {
 		t.Fatalf("foreign same-name service was accepted: %v", err)
 	}
 }

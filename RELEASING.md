@@ -26,10 +26,10 @@ rm -f .release-keys/release-signing-private.pem
 
 1. 确认需要发布的代码已经合并并推送到默认分支。
 2. 打开仓库的 `Actions` 页面。
-3. 在左侧选择 `Release`。
+3. 在左侧选择 `发布版本`。
 4. 点击 `Run workflow`。
 5. Branch 必须选择默认分支，Version 输入 `v6.0.0`。
-6. 正式版本不要勾选 `Publish as a pre-release`。
+6. 正式版本不要勾选 `发布为预发行版本`。
 7. 点击绿色的 `Run workflow` 按钮。
 
 工作流会依次验证版本与分支、运行测试、构建两个架构、校验签名密钥、签名清单、创建不可变版本标签并创建 Release。重复运行同一提交时可以安全复用已经创建的标签；如果同名标签指向其他提交则直接失败。

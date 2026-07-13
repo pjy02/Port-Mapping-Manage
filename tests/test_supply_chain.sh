@@ -41,7 +41,7 @@ PMM_MANIFEST_SHA256="$manifest_sha256" verify_local >/dev/null
 cp "$TEST_ROOT/$binary_name" "$TEST_ROOT/$binary_name.good"
 printf '\ntampered\n' >> "$TEST_ROOT/$binary_name"
 if verify_local >/dev/null 2>&1; then
-    printf '%s\n' "FAIL: tampered binary was accepted" >&2
+    printf '%s\n' "失败：被篡改的程序通过了校验" >&2
     exit 1
 fi
 mv "$TEST_ROOT/$binary_name.good" "$TEST_ROOT/$binary_name"
@@ -50,7 +50,7 @@ cp "$TEST_ROOT/release-manifest.sha256" "$TEST_ROOT/release-manifest.sha256.good
 printf '0%.0s' {1..64} > "$TEST_ROOT/release-manifest.sha256"
 printf '  %s\n' "$binary_name" >> "$TEST_ROOT/release-manifest.sha256"
 if verify_local >/dev/null 2>&1; then
-    printf '%s\n' "FAIL: unsigned manifest change was accepted" >&2
+    printf '%s\n' "失败：未经签名的清单变更通过了校验" >&2
     exit 1
 fi
 mv "$TEST_ROOT/release-manifest.sha256.good" "$TEST_ROOT/release-manifest.sha256"
@@ -58,14 +58,14 @@ mv "$TEST_ROOT/release-manifest.sha256.good" "$TEST_ROOT/release-manifest.sha256
 cp "$TEST_ROOT/release-manifest.sha256.sig" "$TEST_ROOT/release-manifest.sha256.sig.good"
 printf 'invalid-signature' > "$TEST_ROOT/release-manifest.sha256.sig"
 if verify_local >/dev/null 2>&1; then
-    printf '%s\n' "FAIL: invalid manifest signature was accepted" >&2
+    printf '%s\n' "失败：无效的清单签名通过了校验" >&2
     exit 1
 fi
 mv "$TEST_ROOT/release-manifest.sha256.sig.good" "$TEST_ROOT/release-manifest.sha256.sig"
 
 wrong_manifest=$(printf '%064d' 0)
 if PMM_MANIFEST_SHA256="$wrong_manifest" verify_local >/dev/null 2>&1; then
-    printf '%s\n' "FAIL: wrong optional manifest pin was accepted" >&2
+    printf '%s\n' "失败：错误的可选清单固定摘要通过了校验" >&2
     exit 1
 fi
 
@@ -80,4 +80,4 @@ openssl pkey -pubin -in "$PROJECT_ROOT/internal/updater/release-signing-public.p
 cmp "$TEST_ROOT/repository-public.der" "$TEST_ROOT/embedded-public.der"
 cmp "$TEST_ROOT/repository-public.der" "$TEST_ROOT/updater-public.der"
 
-printf '%s\n' "PASS: v6 signed supply-chain verification fails closed"
+printf '%s\n' "通过：v6 签名供应链校验能够安全拒绝异常文件"

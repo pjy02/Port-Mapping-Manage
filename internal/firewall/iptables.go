@@ -33,7 +33,7 @@ func NewIPTables(commandRunner runner.Runner) *IPTables {
 func (b *IPTables) Probe(ctx context.Context) error {
 	for _, family := range families() {
 		if _, err := b.run(ctx, family.command, "-t", "nat", "-S"); err != nil {
-			return fmt.Errorf("probe IPv%d: %w", family.version, err)
+			return fmt.Errorf("探测 IPv%d 防火墙失败：%w", family.version, err)
 		}
 	}
 	return nil
@@ -56,7 +56,7 @@ func (b *IPTables) Snapshot(ctx context.Context) (Snapshot, error) {
 func (b *IPTables) snapshotFamily(ctx context.Context, f family) (FamilySnapshot, error) {
 	result, err := b.run(ctx, f.command, "-t", "nat", "-S")
 	if err != nil {
-		return FamilySnapshot{}, fmt.Errorf("read IPv%d NAT rules: %w", f.version, err)
+		return FamilySnapshot{}, fmt.Errorf("读取 IPv%d NAT 规则失败：%w", f.version, err)
 	}
 	lines := nonEmptyLines(result.Stdout)
 	chains := declaredChains(lines)
@@ -77,28 +77,28 @@ func (b *IPTables) snapshotFamily(ctx context.Context, f family) (FamilySnapshot
 	if anchorCount == 0 && !entryExists {
 		for _, chain := range generationChains {
 			if _, err := parseManagedRules(f.version, rulesForChain(lines, chain)); err != nil {
-				return FamilySnapshot{}, fmt.Errorf("IPv%d orphan chain %s: %w", f.version, chain, err)
+				return FamilySnapshot{}, fmt.Errorf("解析 IPv%d 孤立链 %s 失败：%w", f.version, chain, err)
 			}
 		}
 		return FamilySnapshot{IPVersion: f.version, Rules: []model.Rule{}, OrphanChains: generationChains}, nil
 	}
 	if anchorCount != 1 || !entryExists {
-		return FamilySnapshot{}, fmt.Errorf("IPv%d: %w: anchor=%d entry=%t", f.version, ErrStateDrift, anchorCount, entryExists)
+		return FamilySnapshot{}, fmt.Errorf("IPv%d：%w：锚点数量=%d，入口链存在=%t", f.version, ErrStateDrift, anchorCount, entryExists)
 	}
 	entryRules := rulesForChain(lines, entryChain)
 	if len(entryRules) != 1 {
-		return FamilySnapshot{}, fmt.Errorf("IPv%d: %w: entry chain has %d rules", f.version, ErrOwnershipConflict, len(entryRules))
+		return FamilySnapshot{}, fmt.Errorf("IPv%d：%w：入口链包含 %d 条规则", f.version, ErrOwnershipConflict, len(entryRules))
 	}
 	active, ok := generationTarget(entryRules[0])
 	if !ok {
-		return FamilySnapshot{}, fmt.Errorf("IPv%d: %w: unexpected entry rule", f.version, ErrOwnershipConflict)
+		return FamilySnapshot{}, fmt.Errorf("IPv%d：%w：发现非预期入口规则", f.version, ErrOwnershipConflict)
 	}
 	if _, exists := chains[active]; !exists {
-		return FamilySnapshot{}, fmt.Errorf("IPv%d: %w: active generation chain is missing", f.version, ErrStateDrift)
+		return FamilySnapshot{}, fmt.Errorf("IPv%d：%w：当前代际链缺失", f.version, ErrStateDrift)
 	}
 	rules, err := parseManagedRules(f.version, rulesForChain(lines, active))
 	if err != nil {
-		return FamilySnapshot{}, fmt.Errorf("IPv%d: %w", f.version, err)
+		return FamilySnapshot{}, fmt.Errorf("IPv%d：%w", f.version, err)
 	}
 	var orphans []string
 	for _, chain := range generationChains {
@@ -106,7 +106,7 @@ func (b *IPTables) snapshotFamily(ctx context.Context, f family) (FamilySnapshot
 			continue
 		}
 		if _, err := parseManagedRules(f.version, rulesForChain(lines, chain)); err != nil {
-			return FamilySnapshot{}, fmt.Errorf("IPv%d orphan chain %s: %w", f.version, chain, err)
+			return FamilySnapshot{}, fmt.Errorf("解析 IPv%d 孤立链 %s 失败：%w", f.version, chain, err)
 		}
 		orphans = append(orphans, chain)
 	}
@@ -120,7 +120,7 @@ func (b *IPTables) Apply(ctx context.Context, desired []model.Rule) error {
 	for _, f := range families() {
 		familyRules := filterFamily(desired, f.version)
 		if err := b.applyFamily(ctx, f, familyRules); err != nil {
-			return fmt.Errorf("apply IPv%d: %w", f.version, err)
+			return fmt.Errorf("应用 IPv%d 规则失败：%w", f.version, err)
 		}
 	}
 	return b.Verify(ctx, desired)
@@ -136,7 +136,7 @@ func (b *IPTables) applyFamily(ctx context.Context, f family, desired []model.Ru
 		candidate = candidate[:28]
 	}
 	if _, err := b.run(ctx, f.command, "-t", "nat", "-N", candidate); err != nil {
-		return fmt.Errorf("create candidate chain: %w", err)
+		return fmt.Errorf("创建候选规则链失败：%w", err)
 	}
 	candidateCreated := true
 	entryCreated := false
@@ -161,24 +161,24 @@ func (b *IPTables) applyFamily(ctx context.Context, f family, desired []model.Ru
 		args := []string{"-t", "nat", "-A", candidate, "-p", string(rule.Protocol), "--dport", portRange(rule),
 			"-m", "comment", "--comment", rulePrefix + rule.ID, "-j", "REDIRECT", "--to-ports", strconv.Itoa(int(rule.TargetPort))}
 		if _, err := b.run(ctx, f.command, args...); err != nil {
-			return fmt.Errorf("populate candidate chain for rule %s: %w", rule.ID, err)
+			return fmt.Errorf("向候选链写入规则 %s 失败：%w", rule.ID, err)
 		}
 	}
 	if !before.Managed {
 		if _, err := b.run(ctx, f.command, "-t", "nat", "-N", entryChain); err != nil {
-			return fmt.Errorf("create entry chain: %w", err)
+			return fmt.Errorf("创建入口链失败：%w", err)
 		}
 		entryCreated = true
 		if _, err := b.run(ctx, f.command, "-t", "nat", "-A", "PREROUTING", "-m", "comment", "--comment", anchorComment, "-j", entryChain); err != nil {
-			return fmt.Errorf("create anchor: %w", err)
+			return fmt.Errorf("创建防火墙锚点失败：%w", err)
 		}
 		anchorCreated = true
 		if _, err := b.run(ctx, f.command, "-t", "nat", "-A", entryChain, "-m", "comment", "--comment", generationMark, "-j", candidate); err != nil {
-			return fmt.Errorf("activate candidate: %w", err)
+			return fmt.Errorf("激活候选规则链失败：%w", err)
 		}
 	} else {
 		if _, err := b.run(ctx, f.command, "-t", "nat", "-R", entryChain, "1", "-m", "comment", "--comment", generationMark, "-j", candidate); err != nil {
-			return fmt.Errorf("switch active generation: %w", err)
+			return fmt.Errorf("切换当前代际链失败：%w", err)
 		}
 	}
 	candidateCreated = false
@@ -192,10 +192,10 @@ func (b *IPTables) applyFamily(ctx context.Context, f family, desired []model.Ru
 			continue
 		}
 		if _, err := b.run(ctx, f.command, "-t", "nat", "-F", chain); err != nil {
-			return fmt.Errorf("flush obsolete generation %s: %w", chain, err)
+			return fmt.Errorf("清空旧代际链 %s 失败：%w", chain, err)
 		}
 		if _, err := b.run(ctx, f.command, "-t", "nat", "-X", chain); err != nil {
-			return fmt.Errorf("remove obsolete generation %s: %w", chain, err)
+			return fmt.Errorf("删除旧代际链 %s 失败：%w", chain, err)
 		}
 	}
 	return nil
@@ -210,7 +210,7 @@ func (b *IPTables) Verify(ctx context.Context, desired []model.Rule) error {
 	actual = enabledRules(actual)
 	expected := enabledRules(desired)
 	if !sameRules(actual, expected) {
-		return fmt.Errorf("%w: expected %v, got %v", ErrStateDrift, canonicalKeys(expected), canonicalKeys(actual))
+		return fmt.Errorf("%w：预期 %v，实际 %v", ErrStateDrift, canonicalKeys(expected), canonicalKeys(actual))
 	}
 	return nil
 }
@@ -231,7 +231,7 @@ func (b *IPTables) inspectExternal(ctx context.Context, ignoredComment string) (
 	for _, f := range families() {
 		result, err := b.run(ctx, f.command, "-t", "nat", "-S")
 		if err != nil {
-			return nil, fmt.Errorf("inspect external IPv%d rules: %w", f.version, err)
+			return nil, fmt.Errorf("检查外部 IPv%d 规则失败：%w", f.version, err)
 		}
 		lines := nonEmptyLines(result.Stdout)
 		for _, line := range reachableRules(lines, "PREROUTING") {
@@ -247,11 +247,11 @@ func (b *IPTables) inspectExternal(ctx context.Context, ignoredComment string) (
 			ports, hasPorts := fieldAfter(fields, "--dport")
 			target, hasTarget := fieldAfter(fields, "-j")
 			if strings.Contains(line, "! --dport") {
-				return nil, fmt.Errorf("IPv%d negated destination-port rule cannot be safely analyzed: %s", f.version, line)
+				return nil, fmt.Errorf("无法安全分析 IPv%d 取反目标端口规则：%s", f.version, line)
 			}
 			if !hasPorts {
 				if strings.Contains(line, "--dports") {
-					return nil, fmt.Errorf("IPv%d external multiport rule cannot be safely analyzed: %s", f.version, line)
+					return nil, fmt.Errorf("无法安全分析 IPv%d 外部 multiport 规则：%s", f.version, line)
 				}
 				if hasProtocol && (protocol == string(model.TCP) || protocol == string(model.UDP)) {
 					if _, custom := declaredChains(lines)[target]; hasTarget && !custom {
@@ -261,11 +261,11 @@ func (b *IPTables) inspectExternal(ctx context.Context, ignoredComment string) (
 				continue
 			}
 			if !hasProtocol || (protocol != string(model.TCP) && protocol != string(model.UDP)) {
-				return nil, fmt.Errorf("IPv%d external destination-port rule has unknown protocol: %s", f.version, line)
+				return nil, fmt.Errorf("IPv%d 外部目标端口规则使用未知协议：%s", f.version, line)
 			}
 			start, end, err := parsePortRange(ports)
 			if err != nil {
-				return nil, fmt.Errorf("IPv%d external rule cannot be safely analyzed: %s", f.version, line)
+				return nil, fmt.Errorf("无法安全分析 IPv%d 外部规则：%s", f.version, line)
 			}
 			ranges = append(ranges, ExternalRange{IPVersion: f.version, Protocol: model.Protocol(protocol), StartPort: start, EndPort: end, Raw: line})
 		}
@@ -309,7 +309,7 @@ func (b *IPTables) Counters(ctx context.Context) ([]Counter, error) {
 		}
 		result, err := b.Runner.Run(ctx, command, "-c", "-t", "nat")
 		if err != nil {
-			return nil, fmt.Errorf("read IPv%d counters: %w", f.version, err)
+			return nil, fmt.Errorf("读取 IPv%d 计数器失败：%w", f.version, err)
 		}
 		for _, line := range nonEmptyLines(result.Stdout) {
 			fields := strings.Fields(line)
@@ -323,12 +323,12 @@ func (b *IPTables) Counters(ctx context.Context) ([]Counter, error) {
 			}
 			values := strings.Split(strings.Trim(fields[0], "[]"), ":")
 			if len(values) != 2 {
-				return nil, fmt.Errorf("invalid IPv%d counter line: %s", f.version, line)
+				return nil, fmt.Errorf("IPv%d 计数器记录格式无效：%s", f.version, line)
 			}
 			packets, packetErr := strconv.ParseUint(values[0], 10, 64)
 			bytes, byteErr := strconv.ParseUint(values[1], 10, 64)
 			if packetErr != nil || byteErr != nil {
-				return nil, fmt.Errorf("invalid IPv%d counter values: %s", f.version, line)
+				return nil, fmt.Errorf("IPv%d 计数器数值无效：%s", f.version, line)
 			}
 			counters = append(counters, Counter{RuleID: strings.TrimPrefix(comment, rulePrefix), IPVersion: f.version, Packets: packets, Bytes: bytes})
 		}
@@ -353,7 +353,7 @@ func (b *IPTables) DiscoverLegacy(ctx context.Context, legacyComment string) ([]
 	for _, f := range families() {
 		result, err := b.run(ctx, f.command, "-t", "nat", "-S", "PREROUTING")
 		if err != nil {
-			return nil, fmt.Errorf("read legacy IPv%d rules: %w", f.version, err)
+			return nil, fmt.Errorf("读取旧版 IPv%d 规则失败：%w", f.version, err)
 		}
 		lines := nonEmptyLines(result.Stdout)
 		seenLegacy := false
@@ -362,7 +362,7 @@ func (b *IPTables) DiscoverLegacy(ctx context.Context, legacyComment string) ([]
 			comment, hasComment := fieldAfter(fields, "--comment")
 			owned := hasComment && trimQuotes(comment) == legacyComment
 			if seenLegacy && !owned {
-				return nil, fmt.Errorf("IPv%d legacy PMM rules are interleaved with external rules; automatic migration would change ordering", f.version)
+				return nil, fmt.Errorf("IPv%d 旧版 PMM 规则与外部规则交错排列，自动迁移会改变顺序", f.version)
 			}
 			if !owned {
 				continue
@@ -373,7 +373,7 @@ func (b *IPTables) DiscoverLegacy(ctx context.Context, legacyComment string) ([]
 			target, okTarget := fieldAfter(fields, "-j")
 			toPorts, okToPorts := fieldAfter(fields, "--to-ports")
 			if !okProtocol || !okPorts || !okTarget || !okToPorts || target != "REDIRECT" {
-				return nil, fmt.Errorf("IPv%d legacy rule has an unsupported shape: %s", f.version, line)
+				return nil, fmt.Errorf("IPv%d 旧版规则结构不受支持：%s", f.version, line)
 			}
 			start, end, err := parsePortRange(ports)
 			if err != nil {
@@ -404,7 +404,7 @@ func (b *IPTables) DeleteLegacy(ctx context.Context, legacyComment string, rules
 		args := []string{"-t", "nat", "-D", "PREROUTING", "-p", string(rule.Protocol), "--dport", portRange(rule),
 			"-m", "comment", "--comment", legacyComment, "-j", "REDIRECT", "--to-ports", strconv.Itoa(int(rule.TargetPort))}
 		if _, err := b.run(ctx, command, args...); err != nil {
-			return fmt.Errorf("delete legacy rule %s: %w", rule.ID, err)
+			return fmt.Errorf("删除旧版规则 %s 失败：%w", rule.ID, err)
 		}
 	}
 	return nil
@@ -425,7 +425,7 @@ func (b *IPTables) RestoreLegacy(ctx context.Context, legacyComment string, rule
 		args := []string{"-t", "nat", "-A", "PREROUTING", "-p", string(rule.Protocol), "--dport", portRange(rule),
 			"-m", "comment", "--comment", legacyComment, "-j", "REDIRECT", "--to-ports", strconv.Itoa(int(rule.TargetPort))}
 		if _, err := b.run(ctx, command, args...); err != nil {
-			return fmt.Errorf("restore legacy rule %s: %w", rule.ID, err)
+			return fmt.Errorf("恢复旧版规则 %s 失败：%w", rule.ID, err)
 		}
 	}
 	return nil
@@ -438,7 +438,7 @@ func (b *IPTables) Restore(ctx context.Context, snapshot Snapshot) error {
 	}{{families()[0], snapshot.IPv4}, {families()[1], snapshot.IPv6}} {
 		if item.snapshot.Managed {
 			if err := b.applyFamily(ctx, item.family, item.snapshot.Rules); err != nil {
-				return fmt.Errorf("restore IPv%d: %w", item.family.version, err)
+				return fmt.Errorf("恢复 IPv%d 防火墙状态失败：%w", item.family.version, err)
 			}
 		} else if err := b.deleteFamily(ctx, item.family); err != nil {
 			return err
@@ -464,7 +464,7 @@ func (b *IPTables) deleteFamily(ctx context.Context, f family) error {
 		return nil
 	}
 	if _, err := b.run(ctx, f.command, "-t", "nat", "-D", "PREROUTING", "-m", "comment", "--comment", anchorComment, "-j", entryChain); err != nil {
-		return fmt.Errorf("remove IPv%d anchor: %w", f.version, err)
+		return fmt.Errorf("删除 IPv%d 防火墙锚点失败：%w", f.version, err)
 	}
 	if _, err := b.run(ctx, f.command, "-t", "nat", "-F", entryChain); err != nil {
 		return err
@@ -576,7 +576,7 @@ func parseManagedRules(ipVersion int, lines []string) ([]model.Rule, error) {
 		toPorts, okToPorts := fieldAfter(fields, "--to-ports")
 		comment = trimQuotes(comment)
 		if !okProtocol || !okPorts || !okComment || !okTarget || !okToPorts || target != "REDIRECT" || !strings.HasPrefix(comment, rulePrefix) {
-			return nil, fmt.Errorf("%w: unexpected managed rule %q", ErrOwnershipConflict, line)
+			return nil, fmt.Errorf("%w：发现非预期受管规则 %q", ErrOwnershipConflict, line)
 		}
 		start, end, err := parsePortRange(ports)
 		if err != nil {
@@ -601,15 +601,15 @@ func parsePortRange(value string) (uint16, uint16, error) {
 		parts = append(parts, parts[0])
 	}
 	if len(parts) != 2 {
-		return 0, 0, errors.New("invalid port range")
+		return 0, 0, errors.New("端口范围无效")
 	}
 	start, err := strconv.ParseUint(parts[0], 10, 16)
 	if err != nil || start == 0 {
-		return 0, 0, errors.New("invalid start port")
+		return 0, 0, errors.New("起始端口无效")
 	}
 	end, err := strconv.ParseUint(parts[1], 10, 16)
 	if err != nil || end == 0 || start > end {
-		return 0, 0, errors.New("invalid end port")
+		return 0, 0, errors.New("结束端口无效")
 	}
 	return uint16(start), uint16(end), nil
 }

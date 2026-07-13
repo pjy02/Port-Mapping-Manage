@@ -33,7 +33,7 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) (Result,
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		result.ExitCode = exitErr.ExitCode()
-		return result, fmt.Errorf("%s %s exited with %d: %s", name, strings.Join(args, " "), result.ExitCode, strings.TrimSpace(result.Stderr))
+		return result, fmt.Errorf("命令 %s %s 执行失败，退出码 %d：%s", name, strings.Join(args, " "), result.ExitCode, strings.TrimSpace(result.Stderr))
 	}
-	return result, fmt.Errorf("execute %s: %w", name, err)
+	return result, fmt.Errorf("无法执行命令 %s：%w", name, err)
 }

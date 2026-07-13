@@ -8,8 +8,8 @@ import (
 )
 
 var (
-	ErrOwnershipConflict = errors.New("firewall object exists but is not owned by PMM")
-	ErrStateDrift        = errors.New("firewall state is incomplete or inconsistent")
+	ErrOwnershipConflict = errors.New("防火墙对象已存在，但不属于 PMM")
+	ErrStateDrift        = errors.New("防火墙状态不完整或不一致")
 )
 
 type FamilySnapshot struct {

@@ -56,10 +56,15 @@ type globalOptions struct {
 
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, "错误:", err)
+		if errors.Is(err, errFlagHelpShown) {
+			return
+		}
+		fmt.Fprintln(os.Stderr, "错误："+localizedErrorText(err))
 		os.Exit(1)
 	}
 }
+
+var errFlagHelpShown = errors.New("已显示参数帮助")
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -100,7 +105,7 @@ func parseGlobal(args []string) (globalOptions, error) {
 		case "--root":
 			index++
 			if index >= len(args) || args[index] == "" {
-				return globalOptions{}, errors.New("--root requires a path")
+				return globalOptions{}, errors.New("--root 需要提供路径")
 			}
 			options.root = args[index]
 		case "--json":
@@ -112,7 +117,7 @@ func parseGlobal(args []string) (globalOptions, error) {
 		case "--ip-version":
 			index++
 			if index >= len(args) || (args[index] != "4" && args[index] != "6") {
-				return globalOptions{}, errors.New("--ip-version must be 4 or 6")
+				return globalOptions{}, errors.New("--ip-version 只能是 4 或 6")
 			}
 			options.defaultIP, _ = strconv.Atoi(args[index])
 		case "--help", "-h":
@@ -126,7 +131,7 @@ func parseGlobal(args []string) (globalOptions, error) {
 			return options, nil
 		default:
 			if strings.HasPrefix(args[index], "-") {
-				return globalOptions{}, fmt.Errorf("unknown global option %q", args[index])
+				return globalOptions{}, fmt.Errorf("未知全局选项 %q", args[index])
 			}
 			options.remaining = args[index:]
 			return options, nil
@@ -174,7 +179,7 @@ func (c cli) execute(ctx context.Context, args []string) error {
 	case "repair":
 		return c.repair(ctx, args[1:])
 	default:
-		return fmt.Errorf("unknown command %q; use pmm help", args[0])
+		return fmt.Errorf("未知命令 %q；请运行 pmm help 查看帮助", args[0])
 	}
 }
 
@@ -191,23 +196,23 @@ func (c cli) repair(ctx context.Context, args []string) error {
 		return nil
 	}
 	if args[0] != "reconcile" {
-		return errors.New("repair requires plan or reconcile --yes")
+		return errors.New("repair 需要使用 plan，或使用 reconcile --yes 执行修复")
 	}
 	flags := flag.NewFlagSet("repair reconcile", flag.ContinueOnError)
-	flags.SetOutput(c.stderr)
-	yes := flags.Bool("yes", false, "explicitly apply the committed database to PMM chains")
-	if err := flags.Parse(args[1:]); err != nil {
+	flags.SetOutput(io.Discard)
+	yes := flags.Bool("yes", false, "将已提交数据库显式应用到 PMM 链")
+	if err := parseCommandFlags(flags, args[1:], c.stdout); err != nil {
 		return err
 	}
 	if !*yes {
-		return errors.New("repair reconcile requires --yes")
+		return errors.New("repair reconcile 必须同时指定 --yes")
 	}
 	return c.restoreCommittedState(ctx, "explicit-reconcile")
 }
 
 func (c cli) sample(args []string) error {
 	if len(args) > 1 {
-		return errors.New("sample accepts at most one output file")
+		return errors.New("sample 最多接受一个输出文件")
 	}
 	content := "# PMM-RULES-V2\n# IP版本|协议|起始端口|结束端口|目标端口\n4|udp|6000|7000|3000\n4|tcp|8000|9000|4000\n6|udp|10000|12000|5000\n6|tcp|13000|14000|6000\n"
 	if len(args) == 0 {
@@ -243,17 +248,17 @@ func (c cli) update(ctx context.Context, args []string) error {
 		if c.json {
 			return writeJSON(c.stdout, latest)
 		}
-		fmt.Fprintf(c.stdout, "当前版本: %s，最新版本: %s\n", latest.Current, latest.Latest)
+		fmt.Fprintf(c.stdout, "当前版本：%s，最新版本：%s\n", latest.Current, latest.Latest)
 		if latest.Available {
 			fmt.Fprintln(c.stdout, "发现新版本；运行 sudo pmm update 安装签名验证通过的版本。")
 		}
 		return nil
 	case "install":
 		flags := flag.NewFlagSet("update install", flag.ContinueOnError)
-		flags.SetOutput(c.stderr)
-		ref := flags.String("ref", "latest", "latest or immutable release tag")
-		manifestSHA := flags.String("manifest-sha256", "", "optional independently pinned manifest SHA-256")
-		if err := flags.Parse(args[1:]); err != nil {
+		flags.SetOutput(io.Discard)
+		ref := flags.String("ref", "latest", "latest 或不可变发布标签")
+		manifestSHA := flags.String("manifest-sha256", "", "可选的独立固定清单 SHA-256")
+		if err := parseCommandFlags(flags, args[1:], c.stdout); err != nil {
 			return err
 		}
 		if err := manager.Install(ctx, *ref, *manifestSHA); err != nil {
@@ -262,19 +267,19 @@ func (c cli) update(ctx context.Context, args []string) error {
 		fmt.Fprintln(c.stdout, "更新完成；已验证发布签名和二进制摘要。")
 		return nil
 	default:
-		return fmt.Errorf("unknown update command %q", args[0])
+		return fmt.Errorf("未知更新命令 %q", args[0])
 	}
 }
 
 func (c cli) address(ctx context.Context, args []string) error {
 	if c.config.PublicIPLookup == "off" {
-		return errors.New("public IP lookup is disabled by configuration")
+		return errors.New("配置已禁用公网 IP 查询")
 	}
 	flags := flag.NewFlagSet("address", flag.ContinueOnError)
-	flags.SetOutput(c.stderr)
-	ip := flags.Int("ip", 4, "IP version")
-	refresh := flags.Bool("refresh", false, "ignore the family-specific cache")
-	if err := flags.Parse(args); err != nil {
+	flags.SetOutput(io.Discard)
+	ip := flags.Int("ip", 4, "IP 版本")
+	refresh := flags.Bool("refresh", false, "忽略对应 IP 版本的缓存")
+	if err := parseCommandFlags(flags, args, c.stdout); err != nil {
 		return err
 	}
 	resolver := address.Resolver{CacheV4: c.paths.PublicIPv4, CacheV6: c.paths.PublicIPv6}
@@ -289,13 +294,13 @@ func (c cli) address(ctx context.Context, args []string) error {
 	if result.Cached {
 		cache = "（缓存）"
 	}
-	fmt.Fprintf(c.stdout, "IPv%d 公网地址: %s %s\n", result.IPVersion, result.IP, cache)
+	fmt.Fprintf(c.stdout, "IPv%d 公网地址：%s %s\n", result.IPVersion, result.IP, cache)
 	return nil
 }
 
 func (c cli) rule(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("rule requires list, add, edit, delete, enable or disable")
+		return errors.New("rule 需要指定 list、add、edit、delete、enable 或 disable")
 	}
 	switch args[0] {
 	case "list":
@@ -315,20 +320,20 @@ func (c cli) rule(ctx context.Context, args []string) error {
 			fmt.Fprintf(c.stdout, "%-18s IPv%-3d %-5s %-13s %-8d %-8s\n", rule.ID, rule.IPVersion, rule.Protocol, fmt.Sprintf("%d-%d", rule.StartPort, rule.EndPort), rule.TargetPort, status)
 		}
 		if state.Drift {
-			fmt.Fprintln(c.stdout, "警告: 数据库与内核状态不一致")
+			fmt.Fprintln(c.stdout, "警告：数据库与内核状态不一致")
 		}
 		return nil
 	case "add", "edit":
 		flags := flag.NewFlagSet("rule "+args[0], flag.ContinueOnError)
-		flags.SetOutput(c.stderr)
-		id := flags.String("id", "", "rule ID for edit")
-		ip := flags.Int("ip", c.defaultIP, "IP version")
-		protocol := flags.String("protocol", "udp", "tcp or udp")
-		start := flags.Int("start", 0, "start port")
-		end := flags.Int("end", 0, "end port")
-		target := flags.Int("target", 0, "target port")
-		label := flags.String("label", "", "label")
-		if err := flags.Parse(args[1:]); err != nil {
+		flags.SetOutput(io.Discard)
+		id := flags.String("id", "", "待编辑规则的 ID")
+		ip := flags.Int("ip", c.defaultIP, "IP 版本")
+		protocol := flags.String("protocol", "udp", "协议：tcp 或 udp")
+		start := flags.Int("start", 0, "起始端口")
+		end := flags.Int("end", 0, "结束端口")
+		target := flags.Int("target", 0, "目标端口")
+		label := flags.String("label", "", "规则标签")
+		if err := parseCommandFlags(flags, args[1:], c.stdout); err != nil {
 			return err
 		}
 		rule, err := makeRule(*ip, *protocol, *start, *end, *target, *label)
@@ -340,7 +345,7 @@ func (c cli) rule(ctx context.Context, args []string) error {
 			result, err = c.app.Add(ctx, rule)
 		} else {
 			if *id == "" {
-				return errors.New("edit requires --id")
+				return errors.New("编辑规则必须指定 --id")
 			}
 			labelProvided := false
 			flags.Visit(func(item *flag.Flag) {
@@ -362,7 +367,7 @@ func (c cli) rule(ctx context.Context, args []string) error {
 					}
 				}
 				if !found {
-					return fmt.Errorf("rule %s not found", *id)
+					return fmt.Errorf("找不到规则 %s", *id)
 				}
 			}
 			result, err = c.app.Edit(ctx, *id, rule)
@@ -370,7 +375,7 @@ func (c cli) rule(ctx context.Context, args []string) error {
 		return c.transactionResult(result, err)
 	case "delete", "enable", "disable":
 		if len(args) != 2 {
-			return fmt.Errorf("rule %s requires one rule ID", args[0])
+			return fmt.Errorf("rule %s 需要且只能提供一个规则 ID", args[0])
 		}
 		var result transaction.Result
 		var err error
@@ -382,31 +387,31 @@ func (c cli) rule(ctx context.Context, args []string) error {
 		return c.transactionResult(result, err)
 	case "clear":
 		flags := flag.NewFlagSet("rule clear", flag.ContinueOnError)
-		flags.SetOutput(c.stderr)
-		yes := flags.Bool("yes", false, "confirm removal of every PMM rule")
-		if err := flags.Parse(args[1:]); err != nil {
+		flags.SetOutput(io.Discard)
+		yes := flags.Bool("yes", false, "确认删除全部 PMM 规则")
+		if err := parseCommandFlags(flags, args[1:], c.stdout); err != nil {
 			return err
 		}
 		if !*yes {
-			return errors.New("rule clear requires --yes")
+			return errors.New("清空全部规则必须同时指定 --yes")
 		}
 		result, err := c.app.Clear(ctx)
 		return c.transactionResult(result, err)
 	default:
-		return fmt.Errorf("unknown rule command %q", args[0])
+		return fmt.Errorf("未知规则命令 %q", args[0])
 	}
 }
 
 func (c cli) importRules(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("import", flag.ContinueOnError)
-	flags.SetOutput(c.stderr)
-	legacyIP := flags.Int("legacy-ip", c.defaultIP, "IP version for legacy records")
-	replace := flags.Bool("replace", false, "replace instead of merge")
-	if err := flags.Parse(args); err != nil {
+	flags.SetOutput(io.Discard)
+	legacyIP := flags.Int("legacy-ip", c.defaultIP, "旧格式记录使用的 IP 版本")
+	replace := flags.Bool("replace", false, "替换现有规则，而不是合并")
+	if err := parseCommandFlags(flags, args, c.stdout); err != nil {
 		return err
 	}
 	if flags.NArg() != 1 {
-		return errors.New("import requires a file")
+		return errors.New("导入操作需要提供一个文件")
 	}
 	file, err := os.Open(flags.Arg(0))
 	if err != nil {
@@ -423,13 +428,13 @@ func (c cli) importRules(ctx context.Context, args []string) error {
 
 func (c cli) exportRules(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("export", flag.ContinueOnError)
-	flags.SetOutput(c.stderr)
-	format := flags.String("format", "pipe", "pipe or json")
-	if err := flags.Parse(args); err != nil {
+	flags.SetOutput(io.Discard)
+	format := flags.String("format", "pipe", "输出格式：pipe 或 json")
+	if err := parseCommandFlags(flags, args, c.stdout); err != nil {
 		return err
 	}
 	if flags.NArg() > 1 {
-		return errors.New("export accepts at most one output file")
+		return errors.New("导出操作最多接受一个输出文件")
 	}
 	writer := c.stdout
 	var file *os.File
@@ -447,7 +452,7 @@ func (c cli) exportRules(ctx context.Context, args []string) error {
 
 func (c cli) backup(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("backup requires create, list or restore")
+		return errors.New("backup 需要指定 create、list、restore、delete 或 purge")
 	}
 	switch args[0] {
 	case "create":
@@ -467,13 +472,13 @@ func (c cli) backup(ctx context.Context, args []string) error {
 		return nil
 	case "restore":
 		if len(args) != 2 {
-			return errors.New("backup restore requires a backup file")
+			return errors.New("恢复备份需要提供一个备份文件")
 		}
 		result, err := c.app.Restore(ctx, args[1])
 		return c.transactionResult(result, err)
 	case "delete":
 		if len(args) < 2 {
-			return errors.New("backup delete requires one or more backup files")
+			return errors.New("删除备份需要提供至少一个备份文件")
 		}
 		for _, path := range args[1:] {
 			if err := c.app.Store.DeleteBackup(path); err != nil {
@@ -483,7 +488,7 @@ func (c cli) backup(ctx context.Context, args []string) error {
 		return nil
 	case "purge":
 		if len(args) != 2 || args[1] != "--yes" {
-			return errors.New("backup purge requires --yes")
+			return errors.New("清空全部备份必须使用 backup purge --yes")
 		}
 		backups, err := c.app.ListBackups()
 		if err != nil {
@@ -496,15 +501,15 @@ func (c cli) backup(ctx context.Context, args []string) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("unknown backup command %q", args[0])
+		return fmt.Errorf("未知备份命令 %q", args[0])
 	}
 }
 
 func (c cli) doctor(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	flags.SetOutput(c.stderr)
-	save := flags.Bool("save", false, "persist a diagnostic report")
-	if err := flags.Parse(args); err != nil {
+	flags.SetOutput(io.Discard)
+	save := flags.Bool("save", false, "持久保存诊断报告")
+	if err := parseCommandFlags(flags, args, c.stdout); err != nil {
 		return err
 	}
 	persistenceManager := persistence.Manager{Runner: c.runner, ServicePath: c.paths.Service, BinaryPath: c.paths.Binary}
@@ -518,11 +523,11 @@ func (c cli) doctor(ctx context.Context, args []string) error {
 			return err
 		}
 	} else {
-		fmt.Fprintf(c.stdout, "数据库规则: %d，内核规则: %d\n", len(report.State.Database.Rules), len(report.State.Kernel.Rules()))
+		fmt.Fprintf(c.stdout, "数据库规则：%d，内核规则：%d\n", len(report.State.Database.Rules), len(report.State.Kernel.Rules()))
 		for _, item := range report.Listeners {
-			fmt.Fprintf(c.stdout, "IPv%d %-3s %5d: %s", item.IPVersion, item.Protocol, item.Port, item.Status)
+			fmt.Fprintf(c.stdout, "IPv%d %-3s %5d：%s", item.IPVersion, item.Protocol, item.Port, listener.StatusText(item.Status))
 			if item.Error != "" {
-				fmt.Fprintf(c.stdout, " (%s)", item.Error)
+				fmt.Fprintf(c.stdout, "（%s）", localizedErrorText(errors.New(item.Error)))
 			}
 			fmt.Fprintln(c.stdout)
 		}
@@ -539,14 +544,14 @@ func (c cli) doctor(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(c.stdout, "诊断报告:", path)
+		fmt.Fprintln(c.stdout, "诊断报告：", path)
 	}
 	return nil
 }
 
 func (c cli) persistence(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("persistence requires check, enable, disable or test")
+		return errors.New("persistence 需要指定 check、enable、repair、disable 或 test")
 	}
 	manager := persistence.Manager{Runner: c.runner, ServicePath: c.paths.Service, BinaryPath: c.paths.Binary}
 	switch args[0] {
@@ -567,24 +572,24 @@ func (c cli) persistence(ctx context.Context, args []string) error {
 	case "test":
 		return c.restoreCommittedState(ctx, "persistence-test")
 	default:
-		return fmt.Errorf("unknown persistence command %q", args[0])
+		return fmt.Errorf("未知持久化命令 %q", args[0])
 	}
 }
 
 func (c cli) monitor(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("monitor", flag.ContinueOnError)
-	flags.SetOutput(c.stderr)
-	interval := flags.Duration("interval", time.Second, "sampling interval")
-	count := flags.Int("count", 0, "number of samples; zero means until interrupted")
-	mode := flags.String("mode", "rules", "rules, summary, connections or system")
-	if err := flags.Parse(args); err != nil {
+	flags.SetOutput(io.Discard)
+	interval := flags.Duration("interval", time.Second, "采样间隔")
+	count := flags.Int("count", 0, "采样次数；0 表示持续运行直到中断")
+	mode := flags.String("mode", "rules", "模式：rules、summary、connections 或 system")
+	if err := parseCommandFlags(flags, args, c.stdout); err != nil {
 		return err
 	}
 	if *interval < 100*time.Millisecond {
-		return errors.New("monitor interval must be at least 100ms")
+		return errors.New("监控采样间隔不能小于 100ms")
 	}
 	if *mode != "rules" && *mode != "summary" && *mode != "connections" && *mode != "system" {
-		return errors.New("monitor mode must be rules, summary, connections or system")
+		return errors.New("监控模式只能是 rules、summary、connections 或 system")
 	}
 	sampler := monitor.Sampler{Backend: c.app.Backend}
 	ticker := time.NewTicker(*interval)
@@ -622,7 +627,7 @@ func (c cli) monitor(ctx context.Context, args []string) error {
 					return err
 				}
 			} else {
-				fmt.Fprintf(c.stdout, "%s load=%s memory=%d/%d KiB uptime=%ds IPv4-rules=%d IPv6-rules=%d\n", time.Now().Format(time.RFC3339), report.System.LoadAverage, report.System.MemoryAvailableKB, report.System.MemoryTotalKB, report.System.UptimeSeconds, len(report.State.Kernel.IPv4.Rules), len(report.State.Kernel.IPv6.Rules))
+				fmt.Fprintf(c.stdout, "%s 负载=%s 可用内存=%d/%d KiB 运行时间=%d秒 IPv4规则=%d IPv6规则=%d\n", time.Now().Format(time.RFC3339), report.System.LoadAverage, report.System.MemoryAvailableKB, report.System.MemoryTotalKB, report.System.UptimeSeconds, len(report.State.Kernel.IPv4.Rules), len(report.State.Kernel.IPv6.Rules))
 			}
 			if !waitMonitor(ctx, ticker, *count, sample) {
 				break
@@ -656,16 +661,16 @@ func (c cli) monitor(ctx context.Context, args []string) error {
 					up++
 				}
 			}
-			fmt.Fprintf(c.stdout, "%s packets=%d bytes=%d rate=%.1fpps/%.1fBps listeners=%d\n", time.Now().Format(time.RFC3339), packets, bytes, packetsRate, bytesRate, up)
+			fmt.Fprintf(c.stdout, "%s 数据包=%d 字节=%d 速率=%.1f包/秒、%.1f字节/秒 正常监听=%d\n", time.Now().Format(time.RFC3339), packets, bytes, packetsRate, bytesRate, up)
 		} else {
 			fmt.Fprintln(c.stdout, time.Now().Format(time.RFC3339))
 			for _, rate := range rates {
 				if rate.Baseline {
-					fmt.Fprintf(c.stdout, "  IPv%d %-18s packets=%d bytes=%d rate=N/A\n", rate.Counter.IPVersion, rate.Counter.RuleID, rate.Counter.Packets, rate.Counter.Bytes)
+					fmt.Fprintf(c.stdout, "  IPv%d %-18s 数据包=%d 字节=%d 速率=等待基线\n", rate.Counter.IPVersion, rate.Counter.RuleID, rate.Counter.Packets, rate.Counter.Bytes)
 				} else if rate.Reset {
-					fmt.Fprintf(c.stdout, "  IPv%d %-18s counter reset\n", rate.Counter.IPVersion, rate.Counter.RuleID)
+					fmt.Fprintf(c.stdout, "  IPv%d %-18s 计数器已重置\n", rate.Counter.IPVersion, rate.Counter.RuleID)
 				} else {
-					fmt.Fprintf(c.stdout, "  IPv%d %-18s %.1f pps %.1f B/s\n", rate.Counter.IPVersion, rate.Counter.RuleID, rate.PacketsRate, rate.BytesRate)
+					fmt.Fprintf(c.stdout, "  IPv%d %-18s %.1f 包/秒 %.1f 字节/秒\n", rate.Counter.IPVersion, rate.Counter.RuleID, rate.PacketsRate, rate.BytesRate)
 				}
 			}
 		}
@@ -686,12 +691,12 @@ func (c cli) connectionSnapshot(ctx context.Context) ([]connectionView, error) {
 		name string
 		args []string
 	}{
-		{"IPv4 TCP listening", []string{"-H", "-4", "-lntp"}},
-		{"IPv4 TCP established", []string{"-H", "-4", "-ntp", "state", "established"}},
-		{"IPv4 UDP listening", []string{"-H", "-4", "-lnup"}},
-		{"IPv6 TCP listening", []string{"-H", "-6", "-lntp"}},
-		{"IPv6 TCP established", []string{"-H", "-6", "-ntp", "state", "established"}},
-		{"IPv6 UDP listening", []string{"-H", "-6", "-lnup"}},
+		{"IPv4 TCP 监听", []string{"-H", "-4", "-lntp"}},
+		{"IPv4 TCP 已建立连接", []string{"-H", "-4", "-ntp", "state", "established"}},
+		{"IPv4 UDP 监听", []string{"-H", "-4", "-lnup"}},
+		{"IPv6 TCP 监听", []string{"-H", "-6", "-lntp"}},
+		{"IPv6 TCP 已建立连接", []string{"-H", "-6", "-ntp", "state", "established"}},
+		{"IPv6 UDP 监听", []string{"-H", "-6", "-lnup"}},
 	}
 	views := make([]connectionView, 0, len(commands))
 	for _, command := range commands {
@@ -718,7 +723,7 @@ func waitMonitor(ctx context.Context, ticker *time.Ticker, count, sample int) bo
 
 func (c cli) system(ctx context.Context, args []string) error {
 	if len(args) == 0 || args[0] != "restore" {
-		return errors.New("unknown system command")
+		return errors.New("未知 system 命令")
 	}
 	return c.restoreCommittedState(ctx, "boot-restore")
 }
@@ -734,10 +739,10 @@ func (c cli) restoreCommittedState(ctx context.Context, operation string) error 
 
 func (c cli) migrate(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("migrate", flag.ContinueOnError)
-	flags.SetOutput(c.stderr)
-	source := flags.String("source", "auto", "auto, kernel or database")
-	execute := flags.Bool("execute", false, "execute the migration plan")
-	if err := flags.Parse(args); err != nil {
+	flags.SetOutput(io.Discard)
+	source := flags.String("source", "auto", "迁移来源：auto、kernel 或 database")
+	execute := flags.Bool("execute", false, "执行迁移计划")
+	if err := parseCommandFlags(flags, args, c.stdout); err != nil {
 		return err
 	}
 	manager := migration.Manager{
@@ -766,10 +771,10 @@ func (c cli) migrate(ctx context.Context, args []string) error {
 
 func (c cli) uninstall(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("uninstall", flag.ContinueOnError)
-	flags.SetOutput(c.stderr)
-	yes := flags.Bool("yes", false, "execute uninstall")
-	keepData := flags.Bool("keep-data", false, "keep configuration, backups and reports")
-	if err := flags.Parse(args); err != nil {
+	flags.SetOutput(io.Discard)
+	yes := flags.Bool("yes", false, "执行卸载")
+	keepData := flags.Bool("keep-data", false, "保留配置、备份和诊断报告")
+	if err := parseCommandFlags(flags, args, c.stdout); err != nil {
 		return err
 	}
 	persistenceManager := persistence.Manager{Runner: c.runner, ServicePath: c.paths.Service, BinaryPath: c.paths.Binary}
@@ -802,16 +807,42 @@ func (c cli) transactionResult(result transaction.Result, err error) error {
 		}{result, errorString(err)})
 	}
 	if err != nil {
-		return fmt.Errorf("transaction %s ended in %s: %w", result.TransactionID, result.Phase, err)
+		return fmt.Errorf("事务 %s 在“%s”阶段失败：%w", result.TransactionID, transactionPhaseText(result.Phase), err)
 	}
 	if !c.json {
 		fmt.Fprintf(c.stdout, "事务 %s 已提交", result.TransactionID)
 		if result.BackupPath != "" {
-			fmt.Fprintf(c.stdout, "，备份: %s", result.BackupPath)
+			fmt.Fprintf(c.stdout, "，备份：%s", result.BackupPath)
 		}
 		fmt.Fprintln(c.stdout)
 	}
 	return nil
+}
+
+func transactionPhaseText(phase transaction.Phase) string {
+	switch phase {
+	case transaction.Prepared:
+		return "已准备"
+	case transaction.Applying:
+		return "正在应用"
+	case transaction.Applied:
+		return "已应用"
+	case transaction.Verifying:
+		return "正在验证"
+	case transaction.Committed:
+		return "已提交"
+	case transaction.RollingBack:
+		return "正在回滚"
+	case transaction.RolledBack:
+		return "已回滚"
+	case transaction.RollbackFailed:
+		return "回滚失败"
+	default:
+		if phase == "" {
+			return "未开始"
+		}
+		return string(phase)
+	}
 }
 
 func (c cli) help() {
@@ -844,7 +875,7 @@ func (c cli) help() {
 
 func makeRule(ip int, protocol string, start, end, target int, label string) (model.Rule, error) {
 	if start < 1 || start > 65535 || end < 1 || end > 65535 || target < 1 || target > 65535 {
-		return model.Rule{}, errors.New("ports must be between 1 and 65535")
+		return model.Rule{}, errors.New("端口必须在 1 到 65535 之间")
 	}
 	rule := model.Rule{IPVersion: ip, Protocol: model.Protocol(strings.ToLower(protocol)), StartPort: uint16(start), EndPort: uint16(end), TargetPort: uint16(target), Enabled: true, Label: label}
 	rule.EnsureID()
@@ -857,9 +888,74 @@ func writeJSON(w io.Writer, value any) error {
 	return encoder.Encode(value)
 }
 
+func parseCommandFlags(flags *flag.FlagSet, args []string, helpOutput io.Writer) error {
+	err := flags.Parse(args)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, flag.ErrHelp) {
+		fmt.Fprintf(helpOutput, "%s 可用选项：\n", flags.Name())
+		printChineseFlagDefaults(flags, helpOutput)
+		return errFlagHelpShown
+	}
+	return translateFlagError(err)
+}
+
+func printChineseFlagDefaults(flags *flag.FlagSet, output io.Writer) {
+	flags.VisitAll(func(item *flag.Flag) {
+		valueName, usage := flag.UnquoteUsage(item)
+		fmt.Fprintf(output, "  -%s", item.Name)
+		if valueName != "" {
+			fmt.Fprintf(output, " %s", valueName)
+		}
+		fmt.Fprintf(output, "\n    \t%s", usage)
+		if item.DefValue != "" && item.DefValue != "0" && item.DefValue != "0s" && item.DefValue != "false" {
+			fmt.Fprintf(output, "（默认值：%s）", item.DefValue)
+		}
+		fmt.Fprintln(output)
+	})
+}
+
+func translateFlagError(err error) error {
+	message := err.Error()
+	if name, found := strings.CutPrefix(message, "flag provided but not defined: -"); found {
+		return fmt.Errorf("未知选项：-%s", name)
+	}
+	if name, found := strings.CutPrefix(message, "flag needs an argument: -"); found {
+		return fmt.Errorf("选项缺少参数值：-%s", name)
+	}
+	if remainder, found := strings.CutPrefix(message, "invalid value "); found {
+		if value, optionAndCause, separated := strings.Cut(remainder, " for flag -"); separated {
+			option, _, _ := strings.Cut(optionAndCause, ":")
+			return fmt.Errorf("选项 -%s 的值 %s 无效", option, value)
+		}
+	}
+	return fmt.Errorf("参数解析失败：%s", localizedErrorText(err))
+}
+
+func localizedErrorText(err error) string {
+	return strings.NewReplacer(
+		"json: unknown field", "JSON 包含未知字段",
+		"invalid character", "无效字符",
+		"cannot unmarshal", "无法解析",
+		"unexpected EOF", "内容意外结束",
+		"no such file or directory", "文件或目录不存在",
+		"permission denied", "权限不足",
+		"file exists", "文件已存在",
+		"directory not empty", "目录不为空",
+		"connection refused", "连接被拒绝",
+		"network is unreachable", "网络不可达",
+		"connection timed out", "连接超时",
+		"context canceled", "操作已取消",
+		"context deadline exceeded", "操作超时",
+		"executable file not found", "未找到可执行程序",
+		"invalid syntax", "格式无效",
+	).Replace(err.Error())
+}
+
 func errorString(err error) string {
 	if err == nil {
 		return ""
 	}
-	return err.Error()
+	return localizedErrorText(err)
 }

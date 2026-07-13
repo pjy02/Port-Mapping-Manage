@@ -1,4 +1,4 @@
-name: CI
+name: 持续集成
 
 on:
   push:
@@ -9,45 +9,46 @@ permissions:
 
 jobs:
   go-and-shell:
+    name: Go 与 Shell 检查
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
-      - name: Checkout
+      - name: 检出代码
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Set up Go
+      - name: 配置 Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
           check-latest: false
           cache: false
 
-      - name: Install integration dependencies
+      - name: 安装集成测试依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck iproute2 iptables python3
 
-      - name: Format, unit tests and static analysis
+      - name: 格式、单元测试和静态分析
         run: |
           test -z "$(gofmt -l cmd internal)"
           go test -race ./...
           go vet ./...
 
-      - name: Pinned-toolchain Linux builds
+      - name: 使用固定工具链构建 Linux 程序
         run: |
           mkdir -p dist
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=true -o dist/pmm-linux-amd64 ./cmd/pmm
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=true -o dist/pmm-linux-arm64 ./cmd/pmm
           (cd dist && sha256sum pmm-linux-amd64 pmm-linux-arm64 > release-manifest.sha256)
 
-      - name: Bash syntax and ShellCheck
+      - name: Bash 语法和 ShellCheck 检查
         run: |
           bash -n install_pmm.sh tests/test_supply_chain.sh tests/test_netns_integration.sh
           shellcheck --severity=warning install_pmm.sh tests/test_supply_chain.sh tests/test_netns_integration.sh
 
-      - name: Supply-chain verification
+      - name: 供应链校验测试
         run: bash tests/test_supply_chain.sh
 
-      - name: Network namespace integration
+      - name: 网络命名空间集成测试
         run: sudo --preserve-env=PATH bash tests/test_netns_integration.sh

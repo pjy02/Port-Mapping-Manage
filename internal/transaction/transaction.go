@@ -27,7 +27,7 @@ const (
 	RollbackFailed Phase = "ROLLBACK_FAILED"
 )
 
-var ErrRollbackFailed = errors.New("operation failed and rollback could not restore the previous state")
+var ErrRollbackFailed = errors.New("操作失败，并且回滚未能恢复原状态")
 
 type Journal struct {
 	ID        string            `json:"id"`
@@ -98,7 +98,7 @@ func (m Manager) apply(ctx context.Context, operation string, desired model.Rule
 
 	before, err := m.Backend.Snapshot(ctx)
 	if err != nil {
-		return Result{}, fmt.Errorf("capture kernel snapshot: %w", err)
+		return Result{}, fmt.Errorf("获取内核规则快照失败：%w", err)
 	}
 	if inspectExternal {
 		if err := m.checkExternalConflicts(ctx, desired.Rules); err != nil {
@@ -110,7 +110,7 @@ func (m Manager) apply(ctx context.Context, operation string, desired model.Rule
 		return Result{}, err
 	}
 	if commitDatabase && !sameEnabledRules(current.Rules, before.Rules()) {
-		return Result{}, errors.New("database and managed firewall state differ; run doctor and explicitly reconcile before changing rules")
+		return Result{}, errors.New("数据库与受管防火墙状态不一致；请先运行 doctor，再显式执行 repair reconcile --yes")
 	}
 	desired.Generation = current.Generation
 
@@ -127,7 +127,7 @@ func (m Manager) apply(ctx context.Context, operation string, desired model.Rule
 		// preserves disabled rules and their metadata across rollback/restore.
 		result.BackupPath, err = m.Store.Backup(current)
 		if err != nil {
-			journal.Error = "backup failed: " + err.Error()
+			journal.Error = "备份失败：" + err.Error()
 			_ = m.writeJournal(journalPath, &journal)
 			return result, err
 		}
@@ -138,7 +138,7 @@ func (m Manager) apply(ctx context.Context, operation string, desired model.Rule
 		return result, err
 	}
 	if err := m.Backend.Apply(ctx, desired.Rules); err != nil {
-		return m.rollback(ctx, journalPath, &journal, result, fmt.Errorf("apply firewall state: %w", err))
+		return m.rollback(ctx, journalPath, &journal, result, fmt.Errorf("应用防火墙状态失败：%w", err))
 	}
 	journal.Phase = Applied
 	if err := m.writeJournal(journalPath, &journal); err != nil {
@@ -149,17 +149,17 @@ func (m Manager) apply(ctx context.Context, operation string, desired model.Rule
 		return m.rollback(ctx, journalPath, &journal, result, err)
 	}
 	if err := m.Backend.Verify(ctx, desired.Rules); err != nil {
-		return m.rollback(ctx, journalPath, &journal, result, fmt.Errorf("verify firewall state: %w", err))
+		return m.rollback(ctx, journalPath, &journal, result, fmt.Errorf("验证防火墙状态失败：%w", err))
 	}
 	if commitDatabase {
 		if err := m.Store.Save(desired); err != nil {
-			return m.rollback(ctx, journalPath, &journal, result, fmt.Errorf("commit rule database: %w", err))
+			return m.rollback(ctx, journalPath, &journal, result, fmt.Errorf("提交规则数据库失败：%w", err))
 		}
 	}
 	journal.Phase = Committed
 	journal.Error = ""
 	if err := m.writeJournal(journalPath, &journal); err != nil {
-		return result, fmt.Errorf("firewall and database committed but journal update failed: %w", err)
+		return result, fmt.Errorf("防火墙和数据库已提交，但更新事务日志失败：%w", err)
 	}
 	result.Phase = Committed
 	return result, nil
@@ -193,17 +193,17 @@ func (m Manager) rollback(ctx context.Context, path string, journal *Journal, re
 	_ = m.writeJournal(path, journal)
 	if err := m.Backend.Restore(ctx, journal.Before); err != nil {
 		journal.Phase = RollbackFailed
-		journal.Error = cause.Error() + "; rollback: " + err.Error()
+		journal.Error = cause.Error() + "；回滚失败：" + err.Error()
 		_ = m.writeJournal(path, journal)
 		result.Phase = RollbackFailed
-		return result, fmt.Errorf("%w: %v; rollback: %v", ErrRollbackFailed, cause, err)
+		return result, fmt.Errorf("%w：%v；回滚错误：%v", ErrRollbackFailed, cause, err)
 	}
 	if err := m.verifySnapshot(ctx, journal.Before); err != nil {
 		journal.Phase = RollbackFailed
-		journal.Error = cause.Error() + "; rollback verification: " + err.Error()
+		journal.Error = cause.Error() + "；回滚验证失败：" + err.Error()
 		_ = m.writeJournal(path, journal)
 		result.Phase = RollbackFailed
-		return result, fmt.Errorf("%w: %v; rollback verification: %v", ErrRollbackFailed, cause, err)
+		return result, fmt.Errorf("%w：%v；回滚验证错误：%v", ErrRollbackFailed, cause, err)
 	}
 	journal.Phase = RolledBack
 	_ = m.writeJournal(path, journal)
@@ -217,7 +217,7 @@ func (m Manager) verifySnapshot(ctx context.Context, expected firewall.Snapshot)
 		return err
 	}
 	if actual.IPv4.Managed != expected.IPv4.Managed || actual.IPv6.Managed != expected.IPv6.Managed {
-		return errors.New("managed chain presence differs from pre-transaction state")
+		return errors.New("受管链的存在状态与事务前不一致")
 	}
 	if expected.IPv4.Managed || expected.IPv6.Managed {
 		return m.Backend.Verify(ctx, expected.Rules())
@@ -228,7 +228,7 @@ func (m Manager) verifySnapshot(ctx context.Context, expected firewall.Snapshot)
 func (m Manager) checkExternalConflicts(ctx context.Context, desired []model.Rule) error {
 	external, err := m.Backend.InspectExternal(ctx)
 	if err != nil {
-		return fmt.Errorf("external conflict inspection failed: %w", err)
+		return fmt.Errorf("检查外部规则冲突失败：%w", err)
 	}
 	for _, rule := range desired {
 		if !rule.Enabled {
@@ -236,7 +236,7 @@ func (m Manager) checkExternalConflicts(ctx context.Context, desired []model.Rul
 		}
 		for _, other := range external {
 			if rule.IPVersion == other.IPVersion && rule.Protocol == other.Protocol && rule.StartPort <= other.EndPort && rule.EndPort >= other.StartPort {
-				return fmt.Errorf("rule %s conflicts with external rule: %s", rule.ID, other.Raw)
+				return fmt.Errorf("规则 %s 与外部规则冲突：%s", rule.ID, other.Raw)
 			}
 		}
 	}
